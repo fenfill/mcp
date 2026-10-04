@@ -1,0 +1,57 @@
+{
+  "name": "@fenfill/mcp",
+  "version": "0.1.0",
+  "description": "fenfill MCP server: analyze blank PDF forms with fenfill and fill them locally, so your answers never leave your machine.",
+  "license": "MIT",
+  "author": "fenfill",
+  "homepage": "https://fenfill.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fenfill/mcp.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/fenfill/mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "pdf",
+    "forms",
+    "fenfill"
+  ],
+  "type": "module",
+  "bin": {
+    "fenfill-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "licenses/",
+    "THIRD_PARTY_NOTICES",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "build": "node build.mjs",
+    "smoke": "node build.mjs && node scripts/smoke.mjs",
+    "verify": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@embedpdf/pdfium": "2.15.1",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "@types/node": "^22.20.4",
+    "esbuild": "^0.28.2",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.11",
+    "zod": "^4.4.3"
+  }
+}

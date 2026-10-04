@@ -1,0 +1,270 @@
+# @fenfill/mcp
+
+An [MCP](https://modelcontextprotocol.io) server that lets an AI agent turn a blank PDF form into a
+filled one with [fenfill](https://fenfill.com).
+
+**Fills happen on your machine; only blank forms and templates go to fenfill.** The agent's answers
+are stamped into the PDF locally and are never sent to fenfill or anywhere else.
+
+## How it works
+
+1. **`analyze_form`** uploads the **blank** PDF to fenfill once. fenfill finds the fillable
+   fields (text boxes, checkboxes, dates, character boxes, tables, signatures) and returns them
+   with ids, types and labels. The result is cached on your machine, so asking again is free.
+2. **`fill_form`** takes the agent's answers (`field id → value`), checks them against the
+   fields, and stamps them into a new, flattened PDF. This step runs entirely on your machine,
+   with no network at all.
+3. Saved fenfill templates work the same way: `list_templates` → `get_template` → `fill_template`.
+4. **`preview_page`** shows a page as an image with every field box outlined and tagged, rendered
+   on your machine. If a box is misplaced, missing or mislabeled, **`edit_template`** fixes it in a
+   local working copy that filling uses at once, and **`save_template`** keeps the fix in a saved
+   template.
+
+### What is sent where
+
+| Data                                               | Sent to fenfill?                                                             |
+| -------------------------------------------------- | ---------------------------------------------------------------------------- |
+| The blank PDF you analyze                          | Yes, once (then cached locally)                                              |
+| Your API key                                       | Yes, as `Authorization: Bearer`                                              |
+| The agent's answers, signatures and the filled PDF | **No, never**                                                                |
+| Saved templates (blank PDF, fields, your logo)     | Downloaded from fenfill to fill locally                                      |
+| Page previews (`preview_page`)                     | **No**: rendered on your machine                                             |
+| Layout corrections (`edit_template`)               | Only on `save_template`, and then only the layout and the form's own wording |
+
+`analyze_form` refuses PDFs whose form fields already hold answers, and PDFs this server wrote
+itself, so a filled-in form isn't uploaded by mistake.
+
+On fenfill's side, uploads are encrypted on arrival. Unless you save the form as a template, the
+blank PDF is deleted when the analysis finishes. The analysis result is kept for at most 24 hours
+after it completes, or 1 hour after it is first fetched, whichever comes first.
+
+## Requirements
+
+- Node.js 22 or newer (`npx` comes with it).
+- A fenfill API key (`ff_live_…`): fenfill → Settings → API keys. The API is available on paid
+  plans (Pro and up).
+- Analyzing a form uses one page scan per analyzed page from your plan. Forms that already have
+  native PDF form fields are read directly, with no AI, and use none. Repeat analyses of the same
+  file come from the local cache. Filling never uses scans. `get_account` shows what's left.
+
+## Setup
+
+### Claude Code
+
+```sh
+claude mcp add fenfill --scope user -e FENFILL_API_KEY=ff_live_… -- npx -y @fenfill/mcp
+```
+
+### Claude Desktop
+
+Edit `claude_desktop_config.json` (macOS:
+`~/Library/Application Support/Claude/claude_desktop_config.json`, Windows:
+`%APPDATA%\Claude\claude_desktop_config.json`), then restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "fenfill": {
+      "command": "npx",
+      "args": ["-y", "@fenfill/mcp"],
+      "env": { "FENFILL_API_KEY": "ff_live_…" }
+    }
+  }
+}
+```
+
+### Cursor
+
+Add the same `mcpServers` block to `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one
+project).
+
+### Other MCP clients
+
+Any client that can launch a stdio server works: run `npx -y @fenfill/mcp` with
+`FENFILL_API_KEY` in its environment. The installed command is `fenfill-mcp`.
+
+On native Windows, if the client can't find `npx`, use `"command": "cmd"` with
+`"args": ["/c", "npx", "-y", "@fenfill/mcp"]`.
+
+## Tools
+
+| Tool                    | What it does                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards. |
+| `fill_form`             | Fills an analyzed PDF locally, offline, and writes a new flattened PDF.         |
+| `fill_template`         | Fills a saved fenfill template locally.                                         |
+| `list_templates`        | Lists the workspace's saved templates, newest first.                            |
+| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                 |
+| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template.        |
+| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                  |
+| `get_account`           | Shows the plan, page scans left and limits.                                     |
+| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.       |
+| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.   |
+| `save_template`         | Saves `edit_template`'s working copy to a saved template.                       |
+
+`analyze_form` options: `pages` (e.g. `"1-3,5"`; long PDFs can be analyzed in chunks, and
+`fill_form` merges them), `save_as_template` (also keep it as a fenfill template), `access`
+(with `save_as_template`: `"public"`, the default, or `"restricted"`, which recipient links
+need), `estimate` (price the request first: counts the pages and spots native form fields on
+your machine, uploads nothing, and returns `page_count`, `likely_mode`, `estimated_scans` and
+`scans_remaining`), `detect_extra_blanks` (for PDFs with native form fields: also find blanks
+that have no native field, such as a signature or date line, at 1 page scan per analyzed page;
+a free analysis answers `extra_blanks_available: true` when that is likely worth it), and `force`
+(analyze again even if cached; uses scans again). If it answers `"running"`, call it again with
+the same arguments. To correct the layout and keep the corrections, analyze with
+`save_as_template: true` (edits on an unsaved analysis can be used for filling and previews but
+can't be saved); a result without a template says so in `save_note`.
+
+When fenfill refuses an upload for capacity (`rate_limited`, `too_many_active_jobs`,
+`queue_full`), `analyze_form` waits the server's `retry_after` (plus a little jitter) and
+uploads again by itself, up to about 60 s of waiting per call, then reports the error with
+`waited_s`. These refusals happen before fenfill creates a job, so the retry never pays twice;
+cancelling the call ends the wait. `too_many_active_jobs` counts every running analysis of the
+workspace, free native-field (AcroForm) ones included.
+
+`fill_form` and `fill_template` take `values`, `output_path` (a new `.pdf`) and optional
+`overwrite`. They never overwrite the input PDF.
+
+### Previews and corrections
+
+`preview_page` takes `path` (an analyzed PDF) or `template_id`, a 1-based `page`, optional
+`values` (to see them stamped; the same shapes as `fill_form`, e.g. `table_rows` =
+`[{columnId: value}, …]`, `multiselect` = an array of option ids or labels) and `dpi` (default
+110, max 200). It returns a PNG image plus a legend: each box's tag, id, type, label and `box`.
+It renders the local working copy (`edit_template`) when there is one, otherwise the saved
+template or analyzed version; `edited: true` / `false` in the result says which. The page is rendered on your machine by
+PDFium (WebAssembly, shipped in the package; nothing native is installed), nothing is written to
+disk, and the image goes only to the calling client.
+
+`edit_template` takes `path` or `template_id` and up to 200 `ops`: `set_box` (absolute
+`{id, x, y, w, h}` in one step), `move`, `resize`, `relabel`,
+`retype`, `add`, `delete`, `set_format`, `group`, `ungroup`, `set_options`, `set_required`,
+`set_description`, `set_placeholder` (table rows and columns can't be added or removed yet).
+Coordinates are fractions of the page (0–1) with a top-left origin, the same as the legend's
+`box`. Each op is checked against the rules fenfill applies when saving and is rejected with a
+reason if it breaks them; ops apply in order, all-or-nothing each, except that a box only has to
+lie on the page after the whole batch (so `move` then `resize` works even if the moved box
+overhangs the page in between). `discard: true` drops the working copy. Labels, descriptions,
+placeholders, options, date formats and checkbox symbols are the form's wording, never answers:
+an op whose new wording matches an answer given to `fill_form`, `fill_template` or
+`preview_page` in the same session is rejected before the working copy is written (wording that
+contains an answer of 6+ characters, or equals one of 4–5; equal to a shorter one only warns).
+Once a PDF is saved as a template, `fill_form` and `preview_page` on it use only that template's
+working copy; an older copy of its unsaved analysis is dropped.
+
+`save_template` sends the working copy of a saved template, together with the version it started
+from: if the template changed in fenfill meanwhile, it answers `template_conflict` and keeps your
+local edits. Before anything is sent, it refuses wording that matches an answer given to
+`fill_form`, `fill_template` or `preview_page` in the same session (that list lives only in
+memory). A working copy edited in an earlier session can't be checked against that session's
+answers: `save_template` then answers `confirm_wording_needed` with the changed ids and
+properties (never their text); review them and call again with `confirm_wording: true`. An
+unsaved analysis can be edited for filling but not saved: to keep corrections,
+analyze with `save_as_template: true` and edit that template.
+
+### Value shapes
+
+| Field type          | Value                                                                       |
+| ------------------- | --------------------------------------------------------------------------- |
+| `text`, `multiline` | string, stamped exactly as given                                            |
+| `comb`              | string, one character per cell                                              |
+| `date`              | `"YYYY-MM-DD"`, printed as `YYYY-MM-DD`                                     |
+| `checkbox`          | `true` / `false`                                                            |
+| `radio`             | option id, option label, or the bare option text (`"No"` for `"Smoke? No"`) |
+| `multiselect`       | array of those                                                              |
+| `table`             | `{ "<cellId>": value, … }`                                                  |
+| `table_rows`        | `[{ "<columnId>": value, … }, …]`                                           |
+| `signature`         | `{ "image_path": "/abs/path/signature.png" }` (PNG or JPG)                  |
+
+A date the form asks for in a plain `text` field is not reformatted: write it the way the field's
+label or placeholder asks (for example `10042026` for "mmddyyyy"). A `signature` whose
+`signing_requirement` is `"external"` is signed outside fenfill (on paper, or with an e-signature
+service), so it is left blank.
+
+Unknown field ids (with did-you-mean suggestions), invalid options, comb values that don't fit
+and malformed dates are reported back, so the agent can correct itself. Required fields left empty are listed as
+warnings.
+
+### Branding
+
+`fill_form` output is never branded. `fill_template` applies the same branding as a fill in the
+fenfill web app for that workspace (for example, your logo if you have set one up).
+
+## Configuration
+
+| Variable                       | Default                   | Notes                                                  |
+| ------------------------------ | ------------------------- | ------------------------------------------------------ |
+| `FENFILL_API_KEY`              | (none)                    | `ff_live_…` from fenfill → Settings → API keys.        |
+| `FENFILL_API_URL`              | `https://api.fenfill.com` | https only (http allowed for localhost).               |
+| `FENFILL_CACHE_DIR`            | the OS cache folder       | Holds schemas and blank forms only, never answers.     |
+| `FENFILL_ANALYZE_WAIT_SECONDS` | `50`                      | How long `analyze_form` waits before saying "running". |
+
+`fill_form` works without an API key once a form has been analyzed.
+
+## Files and privacy
+
+- **The cache** (`FENFILL_CACHE_DIR`, by default `~/Library/Caches/fenfill-mcp` on macOS,
+  `~/.cache/fenfill-mcp` on Linux, `%LOCALAPPDATA%\fenfill-mcp\Cache` on Windows; private to
+  your user) holds form schemas, blank template PDFs, the workspace logo, sha256 hashes of the
+  PDFs it produced and `edit_template`'s working copies, **never the answers you fill in**. A
+  working copy holds the layout plus the wording the agent wrote with `edit_template`; the echo
+  guard refuses wording that repeats an answer seen in the same session before it is written.
+- **Cache cleanup:** at startup and at most once a day it deletes blank PDFs and the logo after
+  1 hour, analyses and working copies unused for 90 days, stale job records after 48 hours, and
+  output hashes after a year.
+- **Filled PDFs** are written only where you ask, readable by your user only (mode 0600).
+- **`overwrite: true`** replaces the target file with a new one: the old file's permissions and
+  ACL are not kept, and other hard links to it keep the old content.
+- **Recipient links** from `create_recipient_link` are working access links to the form: treat
+  them as secrets and share them only with that recipient.
+- **Logs** go to stderr and contain tool names, timings and error codes, never field values.
+
+## Troubleshooting
+
+| Error                                 | What to do                                                                                                                                                     |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `missing_api_key` / `invalid_api_key` | Set `FENFILL_API_KEY` in the client's config and restart the client.                                                                                           |
+| `plan_required`                       | The workspace needs a paid plan (Pro and up).                                                                                                                  |
+| `insufficient_scans`                  | Not enough page scans left; analyze fewer `pages` or check `get_account`.                                                                                      |
+| `prefilled_form` / `filled_output`    | Only blank forms can be analyzed; use the original, empty PDF. If it is the blank form (some ship with default text in their fields), use the fenfill web app. |
+| `pdf_password_required`               | Remove the open password first; owner-password PDFs work as they are.                                                                                          |
+| `pdf_fill_forbidden`                  | The PDF's author forbids form filling; fenfill won't fill it. Use a copy that allows filling.                                                                  |
+| `not_analyzed`                        | Run `analyze_form` on the same file (and pages) before `fill_form`.                                                                                            |
+| `output_exists`                       | Pick a new `output_path` or pass `overwrite: true`.                                                                                                            |
+| `rate_limited` / `queue_full`         | `analyze_form` already waited about a minute (`waited_s`); try again later.                                                                                    |
+| `too_many_active_jobs`                | Other analyses in the workspace (free native-field ones too) are still running; try again in a minute, or analyze fewer at once.                               |
+| `template_conflict`                   | The template changed in fenfill since your edits began. Your local edits are kept: `edit_template` with `discard: true`, re-apply the ops, save again.         |
+| `invalid_schema`                      | fenfill (or the local check before it) refused the edited layout; `details` lists each item and reason. Fix them with `edit_template`.                         |
+| `request_too_large`                   | The edited template is too large to save in one request.                                                                                                       |
+| `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent. Put the form's own wording back with `edit_template`.                                 |
+| `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.      |
+| `no_local_edits`                      | `save_template` has nothing to save for that template (edits to an unsaved analysis can't be saved; see above).                                                |
+| `upload_outcome_unknown`              | An earlier upload was interrupted. To avoid charging twice, the same file isn't re-uploaded for about 10 minutes; check `get_account` meanwhile.               |
+
+## API
+
+The server wraps fenfill's REST API: reference at
+[api.fenfill.com/v1/docs](https://api.fenfill.com/v1/docs), OpenAPI spec at
+[api.fenfill.com/v1/openapi.json](https://api.fenfill.com/v1/openapi.json). Fill values are never
+sent to any endpoint; the API has no field for them.
+
+## Verify this package
+
+- Releases are built and published by GitHub Actions from
+  [github.com/fenfill/mcp](https://github.com/fenfill/mcp) with
+  [npm provenance](https://docs.npmjs.com/generating-provenance-statements): the npm page links
+  each version to the exact commit and workflow run that built it.
+- `npm audit signatures` in a project that installs `@fenfill/mcp` checks the registry signature
+  and the provenance attestation.
+- The bundle (`dist/index.js`) is not minified, so what runs on your machine can be read.
+  `dist/pdfium.wasm` is the unmodified PDFium build from `@embedpdf/pdfium` (see
+  `THIRD_PARTY_NOTICES`), loaded only by `preview_page`.
+
+## Security
+
+Report vulnerabilities to [security@fenfill.com](mailto:security@fenfill.com) (or through GitHub
+private vulnerability reporting on the repository), not in public issues.
+
+## License
+
+MIT: see `LICENSE`. Bundled third-party software: see `THIRD_PARTY_NOTICES` and `licenses/`.

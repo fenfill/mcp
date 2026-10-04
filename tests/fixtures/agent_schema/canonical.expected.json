@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "template_id": null,
+  "name": null,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1000,
+      "height": 1400
+    }
+  ],
+  "fields": [
+    {
+      "id": "f-text",
+      "type": "text",
+      "label": "Amount",
+      "page": 1,
+      "box": {
+        "x": 0.105,
+        "y": 0.12,
+        "w": 0.2,
+        "h": 0.045
+      },
+      "section": {
+        "id": "sec-1",
+        "title": "Personal details"
+      },
+      "required": true,
+      "description": "Total due in PLN",
+      "placeholder": "0.00",
+      "autofill": null
+    },
+    {
+      "id": "g-table",
+      "type": "table",
+      "label": "Matrix",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.6,
+        "w": 0.22,
+        "h": 0.04
+      },
+      "section": {
+        "id": "sec-1",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "cells": [
+        {
+          "id": "f-t1",
+          "row": 0,
+          "col": 0,
+          "type": "checkbox",
+          "label": "Cell A"
+        },
+        {
+          "id": "f-t2",
+          "row": 0,
+          "col": 1,
+          "type": "checkbox",
+          "label": "Cell B"
+        }
+      ]
+    },
+    {
+      "id": "g-choice",
+      "type": "radio",
+      "label": "Confirm",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.2,
+        "w": 0.11,
+        "h": 0.03
+      },
+      "section": {
+        "id": "sec-1",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "options": [
+        {
+          "id": "f-checkbox",
+          "label": "Yes"
+        },
+        {
+          "id": "f-checkbox2",
+          "label": "No"
+        }
+      ]
+    },
+    {
+      "id": "f-date",
+      "type": "date",
+      "label": "Date of birth",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.3,
+        "w": 0.25,
+        "h": 0.04
+      },
+      "section": {
+        "id": "sec-1",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null
+    },
+    {
+      "id": "f-signature",
+      "type": "signature",
+      "label": "Signature",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.4,
+        "w": 0.3,
+        "h": 0.08
+      },
+      "section": {
+        "id": "sec-1",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "signing_requirement": "appearance"
+    },
+    {
+      "id": "g-comb",
+      "type": "comb",
+      "label": "PESEL",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.5,
+        "w": 0.4,
+        "h": 0.04
+      },
+      "section": {
+        "id": "sec-1",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "max_length": 4,
+      "cell_type": "date",
+      "date_format": "DDMM"
+    }
+  ],
+  "_parity": {
+    "f-text": {
+      "fill_keys": [
+        "ff-text"
+      ]
+    },
+    "g-table": {
+      "fill_keys": {
+        "f-t1": "ff-t1",
+        "f-t2": "ff-t2"
+      }
+    },
+    "g-choice": {
+      "fill_keys": [
+        "cg-choice"
+      ]
+    },
+    "f-date": {
+      "fill_keys": [
+        "ff-date"
+      ]
+    },
+    "f-signature": {
+      "fill_keys": [
+        "ff-signature"
+      ]
+    },
+    "g-comb": {
+      "fill_keys": [
+        "ff-comb"
+      ],
+      "slots": [
+        4
+      ]
+    }
+  }
+}

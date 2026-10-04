@@ -1,0 +1,6 @@
+node_modules/
+packages/mcp/node_modules/
+packages/mcp/dist/
+packages/mcp/THIRD_PARTY_NOTICES
+*.tgz
+.DS_Store

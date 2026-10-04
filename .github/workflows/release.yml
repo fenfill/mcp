@@ -1,0 +1,53 @@
+# Publishes @fenfill/mcp to npm when a version tag (v1.2.3) is pushed.
+#
+# npm trusted publishing: npmjs.com trusts this repository + workflow file +
+# the `npm` environment, and `npm publish` exchanges this job's GitHub OIDC
+# token (id-token: write) for a short-lived publish credential. There is no
+# NPM_TOKEN secret. Under trusted publishing npm also attaches a provenance
+# attestation automatically (package.json publishConfig.provenance is true too).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    # Protection rules (required reviewers, tag rules) live on this environment.
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No dependency cache: a release builds from a clean install.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.
+      - run: npm install -g npm@11.20.0
+      - run: npm ci
+      - run: npm ci --prefix packages/mcp
+      - run: npm run verify --prefix packages/mcp
+      - run: npm run build --prefix packages/mcp
+      - run: node packages/mcp/scripts/smoke.mjs
+      - name: Tag matches package.json version
+        run: |
+          expected="v$(node -p "require('./packages/mcp/package.json').version")"
+          if [ "$expected" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match packages/mcp/package.json ($expected)" >&2
+            exit 1
+          fi
+      - run: npm publish
+        working-directory: packages/mcp

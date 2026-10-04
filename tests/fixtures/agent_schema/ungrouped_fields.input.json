@@ -1,0 +1,229 @@
+{
+  "version": 5,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p1.webp",
+      "sections": [
+        {
+          "id": "3324b628-61d3-5552-97a6-20307c3765b0",
+          "title": "Personal details"
+        },
+        {
+          "id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+          "title": "Declaration"
+        }
+      ]
+    },
+    {
+      "page": 2,
+      "width": 1240,
+      "height": 1754,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p2.webp",
+      "sections": []
+    }
+  ],
+  "fields": [
+    {
+      "id": "0e2566e0-dbc8-577e-aa1f-46a0fcd8c29f",
+      "label": "Full name",
+      "type": "text",
+      "page": 1,
+      "section_id": "3324b628-61d3-5552-97a6-20307c3765b0",
+      "xpct": 10,
+      "ypct": 12,
+      "wpct": 40,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any",
+        "uppercase": true
+      },
+      "autofill": "name",
+      "required": true,
+      "description": "As on your passport",
+      "placeholder": "Jan Kowalski"
+    },
+    {
+      "id": "91c9c68d-4646-5e6a-958b-52a1b52e9084",
+      "label": "Email",
+      "type": "text",
+      "page": 1,
+      "section_id": "3324b628-61d3-5552-97a6-20307c3765b0",
+      "xpct": 55,
+      "ypct": 12,
+      "wpct": 35,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "autofill": "email"
+    },
+    {
+      "id": "36c28a83-a569-5a73-b4e7-3d57627d0a8a",
+      "label": "Date of birth",
+      "type": "date",
+      "page": 1,
+      "section_id": "3324b628-61d3-5552-97a6-20307c3765b0",
+      "xpct": 10,
+      "ypct": 18,
+      "wpct": 20,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "date_format": "DD.MM.YYYY"
+      },
+      "autofill": "bday"
+    },
+    {
+      "id": "0dbd46d3-8f53-5a7c-8df1-8ad8259763c9",
+      "label": "Issue date",
+      "type": "text",
+      "page": 1,
+      "section_id": "3324b628-61d3-5552-97a6-20307c3765b0",
+      "xpct": 35,
+      "ypct": 18,
+      "wpct": 20,
+      "hpct": 3,
+      "cells": [],
+      "primitive": "date"
+    },
+    {
+      "id": "0d7ef10e-f6c2-5efb-a122-1665336cf9ce",
+      "label": "Additional notes",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 30,
+      "wpct": 80,
+      "hpct": 12,
+      "cells": [],
+      "format": {
+        "variant": "multiline"
+      }
+    },
+    {
+      "id": "bcd86619-6b8f-50d9-9a0a-3c2a93372bf3",
+      "label": "Amount",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 45,
+      "wpct": 20,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "currency"
+      }
+    },
+    {
+      "id": "852a05e1-69ba-51ac-a85b-52ace2bb99a2",
+      "label": "I agree to the terms",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+      "xpct": 10,
+      "ypct": 80,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "format": {
+        "shape": "square",
+        "symbol": "x"
+      },
+      "required": true
+    },
+    {
+      "id": "1291f798-b275-512f-bdb2-182934951618",
+      "label": "Signature",
+      "type": "signature",
+      "page": 1,
+      "section_id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+      "xpct": 10,
+      "ypct": 85,
+      "wpct": 30,
+      "hpct": 6,
+      "cells": []
+    },
+    {
+      "id": "21116ab7-1fa9-5a62-88f3-6cab51172831",
+      "label": "Witness signature",
+      "type": "signature",
+      "page": 1,
+      "section_id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+      "xpct": 55,
+      "ypct": 85,
+      "wpct": 30,
+      "hpct": 6,
+      "cells": [],
+      "signing_requirement": "wet"
+    },
+    {
+      "id": "9e272aaa-cd38-5a75-bd6f-6d56ffe84c44",
+      "type": "note",
+      "label": "Old floating note",
+      "page": 1,
+      "section_id": null,
+      "xpct": 1,
+      "ypct": 1,
+      "wpct": 5,
+      "hpct": 5,
+      "cells": []
+    },
+    {
+      "id": "50def14d-2de0-5e98-9f78-507814a48fe1",
+      "label": "City",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 20,
+      "wpct": 30,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "autofill": "address-level2",
+      "order": 1
+    },
+    {
+      "id": "a8fb991f-2b80-52ab-b229-5afafc41cfe5",
+      "label": "Postal code",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 50,
+      "ypct": 10,
+      "wpct": 20,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "autofill": "postal-code",
+      "order": 0
+    },
+    {
+      "id": "4081b21f-ac89-5111-8218-d4f1fc2afa36",
+      "label": "Country",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 5,
+      "wpct": 30,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      }
+    }
+  ],
+  "groups": []
+}

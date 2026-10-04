@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "template_id": null,
+  "name": null,
+  "page_count": 2,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754
+    },
+    {
+      "page": 2,
+      "width": 1240,
+      "height": 1754
+    }
+  ],
+  "fields": [
+    {
+      "id": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4",
+      "type": "table_rows",
+      "label": "Invoice lines",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.2,
+        "w": 0.7,
+        "h": 0.14
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "columns": [
+        {
+          "id": "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+          "label": "Item",
+          "type": "text"
+        },
+        {
+          "id": "1b245c20-c312-51f7-bb03-f3dea8c6f912",
+          "label": "Paid",
+          "type": "checkbox"
+        }
+      ],
+      "max_rows": 3
+    },
+    {
+      "id": "e4cd6c0a-6ec7-5d28-b982-5affa71b1349",
+      "type": "table_rows",
+      "label": "Expenses",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.6,
+        "w": 0.58,
+        "h": 0.04
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "columns": [
+        {
+          "id": "786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "label": "Description",
+          "type": "text"
+        },
+        {
+          "id": "e057b68b-484e-56bb-91e3-0b01dad66020",
+          "label": "Amount",
+          "type": "text"
+        }
+      ],
+      "max_rows": 7
+    },
+    {
+      "id": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb",
+      "type": "table_rows",
+      "label": "Employment history",
+      "page": 2,
+      "box": {
+        "x": 0.1,
+        "y": 0.3,
+        "w": 0.58,
+        "h": 0.1
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "columns": [
+        {
+          "id": "3f1b953e-0fe9-5154-84f2-285d8aff38f5",
+          "label": "Employer",
+          "type": "text"
+        },
+        {
+          "id": "f124ad5c-e66a-5be3-8dc6-9ceaf51a37ad",
+          "label": "Duties",
+          "type": "multiline"
+        }
+      ],
+      "max_rows": 2
+    }
+  ],
+  "_parity": {
+    "cbbe0368-86fb-5d94-9ddd-7b635232d1d4": {
+      "fill_keys": [
+        {
+          "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b": "fea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+          "1b245c20-c312-51f7-bb03-f3dea8c6f912": "f1b245c20-c312-51f7-bb03-f3dea8c6f912"
+        },
+        {
+          "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b": "ecbbe0368-86fb-5d94-9ddd-7b635232d1d4.1.ea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+          "1b245c20-c312-51f7-bb03-f3dea8c6f912": "ecbbe0368-86fb-5d94-9ddd-7b635232d1d4.1.1b245c20-c312-51f7-bb03-f3dea8c6f912"
+        },
+        {
+          "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b": "ecbbe0368-86fb-5d94-9ddd-7b635232d1d4.2.ea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+          "1b245c20-c312-51f7-bb03-f3dea8c6f912": "ecbbe0368-86fb-5d94-9ddd-7b635232d1d4.2.1b245c20-c312-51f7-bb03-f3dea8c6f912"
+        }
+      ],
+      "row_count_key": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    "e4cd6c0a-6ec7-5d28-b982-5affa71b1349": {
+      "fill_keys": [
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "f786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "fe057b68b-484e-56bb-91e3-0b01dad66020"
+        },
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.1.786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.1.e057b68b-484e-56bb-91e3-0b01dad66020"
+        },
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.2.786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.2.e057b68b-484e-56bb-91e3-0b01dad66020"
+        },
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.3.786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.3.e057b68b-484e-56bb-91e3-0b01dad66020"
+        },
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.4.786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.4.e057b68b-484e-56bb-91e3-0b01dad66020"
+        },
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.5.786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.5.e057b68b-484e-56bb-91e3-0b01dad66020"
+        },
+        {
+          "786f7549-a2e8-56e3-9ca2-d1765e84b805": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.6.786f7549-a2e8-56e3-9ca2-d1765e84b805",
+          "e057b68b-484e-56bb-91e3-0b01dad66020": "ee4cd6c0a-6ec7-5d28-b982-5affa71b1349.6.e057b68b-484e-56bb-91e3-0b01dad66020"
+        }
+      ],
+      "row_count_key": "e4cd6c0a-6ec7-5d28-b982-5affa71b1349"
+    },
+    "a9d6e3f3-90f6-582d-b2c6-4638126b40bb": {
+      "fill_keys": [
+        {
+          "3f1b953e-0fe9-5154-84f2-285d8aff38f5": "f3f1b953e-0fe9-5154-84f2-285d8aff38f5",
+          "f124ad5c-e66a-5be3-8dc6-9ceaf51a37ad": "ff124ad5c-e66a-5be3-8dc6-9ceaf51a37ad"
+        },
+        {
+          "3f1b953e-0fe9-5154-84f2-285d8aff38f5": "ea9d6e3f3-90f6-582d-b2c6-4638126b40bb.1.3f1b953e-0fe9-5154-84f2-285d8aff38f5",
+          "f124ad5c-e66a-5be3-8dc6-9ceaf51a37ad": "ea9d6e3f3-90f6-582d-b2c6-4638126b40bb.1.f124ad5c-e66a-5be3-8dc6-9ceaf51a37ad"
+        }
+      ],
+      "row_count_key": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb"
+    }
+  }
+}

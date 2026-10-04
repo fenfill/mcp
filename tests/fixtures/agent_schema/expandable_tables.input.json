@@ -1,0 +1,308 @@
+{
+  "version": 5,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p1.webp",
+      "sections": []
+    },
+    {
+      "page": 2,
+      "width": 1240,
+      "height": 1754,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p2.webp",
+      "sections": []
+    }
+  ],
+  "fields": [
+    {
+      "id": "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+      "label": "Item",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 20,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "1b245c20-c312-51f7-bb03-f3dea8c6f912",
+      "label": "Paid",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 60,
+      "ypct": 20,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "6a3d06e1-731d-588f-bdef-ab2acaa8e0ef",
+      "label": "Item",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 25,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "53e659a0-0e56-5f2e-ba69-86eeead70690",
+      "label": "Qty",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 35,
+      "ypct": 25,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "7aa79f30-c7ff-5786-8c98-d9586a7b38b2",
+      "label": "Paid",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 60,
+      "ypct": 25,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "ace82355-2279-52ca-8bcd-322c48fa577a",
+      "label": "Item",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 30,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "e9cb8672-b124-58e4-9545-59ad30997637",
+      "label": "Qty",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 35,
+      "ypct": 30,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "f5c47e90-fd30-5d63-a9bb-9bf651cb125b",
+      "label": "Paid",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 60,
+      "ypct": 30,
+      "wpct": 20,
+      "hpct": 4,
+      "cells": [],
+      "group": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4"
+    },
+    {
+      "id": "786f7549-a2e8-56e3-9ca2-d1765e84b805",
+      "label": "Description",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 60,
+      "wpct": 28,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "e4cd6c0a-6ec7-5d28-b982-5affa71b1349"
+    },
+    {
+      "id": "e057b68b-484e-56bb-91e3-0b01dad66020",
+      "label": "Amount",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 40,
+      "ypct": 60,
+      "wpct": 28,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "e4cd6c0a-6ec7-5d28-b982-5affa71b1349"
+    },
+    {
+      "id": "3f1b953e-0fe9-5154-84f2-285d8aff38f5",
+      "label": "Employer",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 30,
+      "wpct": 28,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb"
+    },
+    {
+      "id": "f124ad5c-e66a-5be3-8dc6-9ceaf51a37ad",
+      "label": "Duties",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 40,
+      "ypct": 30,
+      "wpct": 28,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "multiline"
+      },
+      "group": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb"
+    },
+    {
+      "id": "8a7f2e42-7bd3-5736-a2c3-e962b0a44eb9",
+      "label": "Employer",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 36,
+      "wpct": 28,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb"
+    },
+    {
+      "id": "725a167b-1b3c-536d-b740-7da841697810",
+      "label": "Duties",
+      "type": "text",
+      "page": 2,
+      "section_id": null,
+      "xpct": 40,
+      "ypct": 36,
+      "wpct": 28,
+      "hpct": 4,
+      "cells": [],
+      "format": {
+        "variant": "multiline"
+      },
+      "group": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb"
+    }
+  ],
+  "groups": [
+    {
+      "id": "cbbe0368-86fb-5d94-9ddd-7b635232d1d4",
+      "kind": "table",
+      "format": "expandable",
+      "label": "Invoice lines",
+      "page": 1,
+      "members": [
+        "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+        "1b245c20-c312-51f7-bb03-f3dea8c6f912",
+        "6a3d06e1-731d-588f-bdef-ab2acaa8e0ef",
+        "53e659a0-0e56-5f2e-ba69-86eeead70690",
+        "7aa79f30-c7ff-5786-8c98-d9586a7b38b2",
+        "ace82355-2279-52ca-8bcd-322c48fa577a",
+        "e9cb8672-b124-58e4-9545-59ad30997637",
+        "f5c47e90-fd30-5d63-a9bb-9bf651cb125b"
+      ],
+      "rows": 3,
+      "cols": 3,
+      "header_cols": [
+        "Item",
+        "Quantity",
+        "Paid"
+      ],
+      "header_rows": [
+        "",
+        "",
+        ""
+      ],
+      "grid": [
+        [
+          "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b",
+          null,
+          "1b245c20-c312-51f7-bb03-f3dea8c6f912"
+        ],
+        [
+          "6a3d06e1-731d-588f-bdef-ab2acaa8e0ef",
+          "53e659a0-0e56-5f2e-ba69-86eeead70690",
+          "7aa79f30-c7ff-5786-8c98-d9586a7b38b2"
+        ],
+        [
+          "ace82355-2279-52ca-8bcd-322c48fa577a",
+          "e9cb8672-b124-58e4-9545-59ad30997637",
+          "f5c47e90-fd30-5d63-a9bb-9bf651cb125b"
+        ]
+      ]
+    },
+    {
+      "id": "e4cd6c0a-6ec7-5d28-b982-5affa71b1349",
+      "kind": "expandable_table",
+      "label": "Expenses",
+      "page": 1,
+      "members": [
+        "e057b68b-484e-56bb-91e3-0b01dad66020",
+        "786f7549-a2e8-56e3-9ca2-d1765e84b805"
+      ]
+    },
+    {
+      "id": "a9d6e3f3-90f6-582d-b2c6-4638126b40bb",
+      "kind": "table",
+      "format": "expandable",
+      "label": "Employment history",
+      "page": 2,
+      "members": [
+        "3f1b953e-0fe9-5154-84f2-285d8aff38f5",
+        "f124ad5c-e66a-5be3-8dc6-9ceaf51a37ad",
+        "8a7f2e42-7bd3-5736-a2c3-e962b0a44eb9",
+        "725a167b-1b3c-536d-b740-7da841697810"
+      ],
+      "order": 0
+    }
+  ]
+}

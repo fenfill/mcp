@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "template_id": null,
+  "name": null,
+  "page_count": 2,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754
+    },
+    {
+      "page": 2,
+      "width": 1240,
+      "height": 1754
+    }
+  ],
+  "fields": [
+    {
+      "id": "0e2566e0-dbc8-577e-aa1f-46a0fcd8c29f",
+      "type": "text",
+      "label": "Full name",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.12,
+        "w": 0.4,
+        "h": 0.03
+      },
+      "section": {
+        "id": "3324b628-61d3-5552-97a6-20307c3765b0",
+        "title": "Personal details"
+      },
+      "required": true,
+      "description": "As on your passport",
+      "placeholder": "Jan Kowalski",
+      "autofill": "name"
+    },
+    {
+      "id": "91c9c68d-4646-5e6a-958b-52a1b52e9084",
+      "type": "text",
+      "label": "Email",
+      "page": 1,
+      "box": {
+        "x": 0.55,
+        "y": 0.12,
+        "w": 0.35,
+        "h": 0.03
+      },
+      "section": {
+        "id": "3324b628-61d3-5552-97a6-20307c3765b0",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": "email"
+    },
+    {
+      "id": "36c28a83-a569-5a73-b4e7-3d57627d0a8a",
+      "type": "date",
+      "label": "Date of birth",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.18,
+        "w": 0.2,
+        "h": 0.03
+      },
+      "section": {
+        "id": "3324b628-61d3-5552-97a6-20307c3765b0",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": "bday"
+    },
+    {
+      "id": "0dbd46d3-8f53-5a7c-8df1-8ad8259763c9",
+      "type": "date",
+      "label": "Issue date",
+      "page": 1,
+      "box": {
+        "x": 0.35,
+        "y": 0.18,
+        "w": 0.2,
+        "h": 0.03
+      },
+      "section": {
+        "id": "3324b628-61d3-5552-97a6-20307c3765b0",
+        "title": "Personal details"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null
+    },
+    {
+      "id": "0d7ef10e-f6c2-5efb-a122-1665336cf9ce",
+      "type": "multiline",
+      "label": "Additional notes",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.3,
+        "w": 0.8,
+        "h": 0.12
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null
+    },
+    {
+      "id": "bcd86619-6b8f-50d9-9a0a-3c2a93372bf3",
+      "type": "text",
+      "label": "Amount",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.45,
+        "w": 0.2,
+        "h": 0.03
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null
+    },
+    {
+      "id": "852a05e1-69ba-51ac-a85b-52ace2bb99a2",
+      "type": "checkbox",
+      "label": "I agree to the terms",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.8,
+        "w": 0.02,
+        "h": 0.02
+      },
+      "section": {
+        "id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+        "title": "Declaration"
+      },
+      "required": true,
+      "description": null,
+      "placeholder": null,
+      "autofill": null
+    },
+    {
+      "id": "1291f798-b275-512f-bdb2-182934951618",
+      "type": "signature",
+      "label": "Signature",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.85,
+        "w": 0.3,
+        "h": 0.06
+      },
+      "section": {
+        "id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+        "title": "Declaration"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "signing_requirement": "appearance"
+    },
+    {
+      "id": "21116ab7-1fa9-5a62-88f3-6cab51172831",
+      "type": "signature",
+      "label": "Witness signature",
+      "page": 1,
+      "box": {
+        "x": 0.55,
+        "y": 0.85,
+        "w": 0.3,
+        "h": 0.06
+      },
+      "section": {
+        "id": "3089c11c-a49b-5da4-b4d9-03657b5c0e15",
+        "title": "Declaration"
+      },
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "signing_requirement": "external"
+    },
+    {
+      "id": "a8fb991f-2b80-52ab-b229-5afafc41cfe5",
+      "type": "text",
+      "label": "Postal code",
+      "page": 2,
+      "box": {
+        "x": 0.5,
+        "y": 0.1,
+        "w": 0.2,
+        "h": 0.03
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": "postal-code"
+    },
+    {
+      "id": "50def14d-2de0-5e98-9f78-507814a48fe1",
+      "type": "text",
+      "label": "City",
+      "page": 2,
+      "box": {
+        "x": 0.1,
+        "y": 0.2,
+        "w": 0.3,
+        "h": 0.03
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": "address-level2"
+    },
+    {
+      "id": "4081b21f-ac89-5111-8218-d4f1fc2afa36",
+      "type": "text",
+      "label": "Country",
+      "page": 2,
+      "box": {
+        "x": 0.1,
+        "y": 0.05,
+        "w": 0.3,
+        "h": 0.03
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null
+    }
+  ],
+  "_parity": {
+    "0e2566e0-dbc8-577e-aa1f-46a0fcd8c29f": {
+      "fill_keys": [
+        "f0e2566e0-dbc8-577e-aa1f-46a0fcd8c29f"
+      ]
+    },
+    "91c9c68d-4646-5e6a-958b-52a1b52e9084": {
+      "fill_keys": [
+        "f91c9c68d-4646-5e6a-958b-52a1b52e9084"
+      ]
+    },
+    "36c28a83-a569-5a73-b4e7-3d57627d0a8a": {
+      "fill_keys": [
+        "f36c28a83-a569-5a73-b4e7-3d57627d0a8a"
+      ]
+    },
+    "0dbd46d3-8f53-5a7c-8df1-8ad8259763c9": {
+      "fill_keys": [
+        "f0dbd46d3-8f53-5a7c-8df1-8ad8259763c9"
+      ]
+    },
+    "0d7ef10e-f6c2-5efb-a122-1665336cf9ce": {
+      "fill_keys": [
+        "f0d7ef10e-f6c2-5efb-a122-1665336cf9ce"
+      ]
+    },
+    "bcd86619-6b8f-50d9-9a0a-3c2a93372bf3": {
+      "fill_keys": [
+        "fbcd86619-6b8f-50d9-9a0a-3c2a93372bf3"
+      ]
+    },
+    "852a05e1-69ba-51ac-a85b-52ace2bb99a2": {
+      "fill_keys": [
+        "f852a05e1-69ba-51ac-a85b-52ace2bb99a2"
+      ]
+    },
+    "1291f798-b275-512f-bdb2-182934951618": {
+      "fill_keys": [
+        "f1291f798-b275-512f-bdb2-182934951618"
+      ]
+    },
+    "21116ab7-1fa9-5a62-88f3-6cab51172831": {
+      "fill_keys": [
+        "f21116ab7-1fa9-5a62-88f3-6cab51172831"
+      ]
+    },
+    "a8fb991f-2b80-52ab-b229-5afafc41cfe5": {
+      "fill_keys": [
+        "fa8fb991f-2b80-52ab-b229-5afafc41cfe5"
+      ]
+    },
+    "50def14d-2de0-5e98-9f78-507814a48fe1": {
+      "fill_keys": [
+        "f50def14d-2de0-5e98-9f78-507814a48fe1"
+      ]
+    },
+    "4081b21f-ac89-5111-8218-d4f1fc2afa36": {
+      "fill_keys": [
+        "f4081b21f-ac89-5111-8218-d4f1fc2afa36"
+      ]
+    }
+  }
+}

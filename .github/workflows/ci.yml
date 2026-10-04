@@ -1,0 +1,46 @@
+# CI for the @fenfill/mcp mirror: typecheck, tests, build, bundle smoke, pack
+# check and dependency audit on every push to main and every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mcp:
+    name: "@fenfill/mcp"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/mcp/package-lock.json
+      # The root install holds the PDF libraries the shared stamping code
+      # (app/t/[template_id]/) imports; the package has its own lockfile.
+      - run: npm ci
+      - run: npm ci --prefix packages/mcp
+      - run: npm run typecheck --prefix packages/mcp
+      - run: npm test --prefix packages/mcp
+      - run: npm run build --prefix packages/mcp
+      # Runs the built bundle over stdio from a copy outside the repo and fills a
+      # plain and an owner-password PDF offline; stdout must be pure JSON-RPC.
+      - run: node packages/mcp/scripts/smoke.mjs
+      - run: npm pack --dry-run
+        working-directory: packages/mcp
+      - run: npm audit --audit-level=high
+      - run: npm audit --audit-level=high
+        working-directory: packages/mcp

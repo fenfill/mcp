@@ -1,0 +1,170 @@
+{
+  "version": 5,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1000,
+      "height": 1400,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p1.png",
+      "sections": [
+        {
+          "id": "sec-1",
+          "title": "Personal details",
+          "description": "Tell us about yourself"
+        }
+      ]
+    }
+  ],
+  "fields": [
+    {
+      "id": "f-text",
+      "label": "Amount",
+      "type": "text",
+      "format": { "variant": "currency", "font_size": 12, "text_anchor": "middle-center" },
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 10.5,
+      "ypct": 12.0,
+      "wpct": 20.0,
+      "hpct": 4.5,
+      "cells": [],
+      "order": 0,
+      "description": "Total due in PLN",
+      "placeholder": "0.00",
+      "required": true
+    },
+    {
+      "id": "f-checkbox",
+      "label": "Yes",
+      "type": "checkbox",
+      "format": { "shape": "round", "symbol": "v" },
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 10.0,
+      "ypct": 20.0,
+      "wpct": 3.0,
+      "hpct": 3.0,
+      "cells": [],
+      "group": "g-choice"
+    },
+    {
+      "id": "f-checkbox2",
+      "label": "No",
+      "type": "checkbox",
+      "format": { "shape": "square", "symbol": "x" },
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 18.0,
+      "ypct": 20.0,
+      "wpct": 3.0,
+      "hpct": 3.0,
+      "cells": [],
+      "group": "g-choice"
+    },
+    {
+      "id": "f-date",
+      "label": "Date of birth",
+      "type": "date",
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 10.0,
+      "ypct": 30.0,
+      "wpct": 25.0,
+      "hpct": 4.0,
+      "cells": []
+    },
+    {
+      "id": "f-signature",
+      "label": "Signature",
+      "type": "signature",
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 10.0,
+      "ypct": 40.0,
+      "wpct": 30.0,
+      "hpct": 8.0,
+      "cells": []
+    },
+    {
+      "id": "f-comb",
+      "label": "PESEL",
+      "type": "text",
+      "format": { "variant": "any" },
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 10.0,
+      "ypct": 50.0,
+      "wpct": 40.0,
+      "hpct": 4.0,
+      "cells": [
+        { "x": 10.0, "y": 50.0, "w": 10.0, "h": 4.0 },
+        { "x": 20.0, "y": 50.0, "w": 10.0, "h": 4.0 },
+        { "x": 30.0, "y": 50.0, "w": 10.0, "h": 4.0 },
+        { "x": 40.0, "y": 50.0, "w": 10.0, "h": 4.0 }
+      ],
+      "group": "g-comb"
+    },
+    {
+      "id": "f-t1",
+      "label": "Cell A",
+      "type": "text",
+      "format": { "variant": "any" },
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 10.0,
+      "ypct": 60.0,
+      "wpct": 10.0,
+      "hpct": 4.0,
+      "cells": [],
+      "group": "g-table"
+    },
+    {
+      "id": "f-t2",
+      "label": "Cell B",
+      "type": "text",
+      "format": { "variant": "any" },
+      "page": 1,
+      "section_id": "sec-1",
+      "xpct": 22.0,
+      "ypct": 60.0,
+      "wpct": 10.0,
+      "hpct": 4.0,
+      "cells": [],
+      "group": "g-table"
+    }
+  ],
+  "groups": [
+    {
+      "id": "g-choice",
+      "kind": "choice",
+      "format": "single",
+      "label": "Confirm",
+      "page": 1,
+      "members": ["f-checkbox", "f-checkbox2"]
+    },
+    {
+      "id": "g-comb",
+      "kind": "comb",
+      "label": "PESEL",
+      "page": 1,
+      "members": ["f-comb"],
+      "cell_type": "date",
+      "date_format": "DDMM"
+    },
+    {
+      "id": "g-table",
+      "kind": "table",
+      "format": "checkbox_matrix",
+      "label": "Matrix",
+      "page": 1,
+      "members": ["f-t1", "f-t2"],
+      "orientation": "col",
+      "rows": 1,
+      "cols": 2,
+      "header_cols": ["A", "B"],
+      "header_rows": ["R1"],
+      "grid": [["f-t1", "f-t2"]],
+      "order": 5
+    }
+  ]
+}
