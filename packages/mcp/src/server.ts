@@ -1,4 +1,4 @@
-// The MCP server: eleven tools over /v1 plus local filling, previews and
+// The MCP server: twelve tools over /v1 plus local filling, previews and
 // layout corrections.
 //
 // PRIVACY: fill values arrive as the `values` argument of fill_form /
@@ -36,6 +36,8 @@ import {
   sha256Hex,
   type WorkingCopy,
 } from "./cache.js";
+import { agentEntries, normalizeSchema } from "@/app/t/[template_id]/fillCore";
+
 import { compactView } from "./compact.js";
 import {
   type ApiConfig,
@@ -55,11 +57,14 @@ import {
 import { loadFonts, toArrayBuffer } from "./fonts.js";
 import { log } from "./log.js";
 import { EchoGuard } from "./echo.js";
-import { applyOps, changedWording, MAX_OPS, wordingChanges } from "./edits.js";
+import { applyOps, changedWording, MAX_OPS, type Snapper, wordingChanges } from "./edits.js";
 import { mergeAnalyses, soleTemplateId } from "./merge.js";
 import { parsePageSpec } from "./pages.js";
-import { previewPage } from "./preview.js";
+import { placementWarnings, stampedSizes } from "./placement.js";
+import { legendChanges, legendPrints, legendRows, MAX_ZOOM, previewPage } from "./preview.js";
+import { analyzedPagesOf, RERUN_KINDS, reanalyzeTemplate } from "./reanalyze.js";
 import { DEFAULT_DPI, MAX_DPI } from "./render.js";
+import { pageOfId, prepareSnapper, snapPages } from "./snap.js";
 import { SWEEP_INTERVAL_MS, sweepCache } from "./sweep.js";
 import type { Account, AgentSchema, RenderSchema, TemplateUpdated } from "./types.js";
 import { schemaIssues } from "./validate.js";
@@ -93,20 +98,23 @@ const TOOL_NAMES = [
   "preview_page",
   "edit_template",
   "save_template",
+  "reanalyze_template",
 ] as const;
 export { TOOL_NAMES };
 
 // What each value looks like. Text is stamped verbatim (a date asked for in a
-// text box goes in that box's own format); a `date` field takes ISO and prints
-// ISO (agentValues.ts coerceDate; the browser stores and stamps the same).
+// text box goes in that box's own format); a `date` field takes ISO
+// (agentValues.ts coerceDate, as the browser stores it) and prints in the
+// field's date_format (fillMarks.ts, every fill path).
 const VALUE_SHAPES =
-  'values maps field ids to: text/multiline = string, stamped exactly as given (a date in a text field goes in the format its label or placeholder asks, e.g. "mmddyyyy" → "10042026"); date = "YYYY-MM-DD", printed as YYYY-MM-DD; comb = string, one character per cell; checkbox = boolean; radio = option id or label, or the bare option text ("No" for "Smoke? No"); multiselect = array of those; table = {cellId: value}; table_rows = [{columnId: value}, …]; signature = {"image_path": "/abs/sig.png"} (PNG or JPG). A signature with signing_requirement "external" is signed outside fenfill (on paper or by e-sign) and stays blank.';
+  'values maps field ids to: text/multiline = string, stamped exactly as given (a date in a text field goes in the format its label or placeholder asks, e.g. "mmddyyyy" → "10042026"); date = "YYYY-MM-DD", printed in the field\'s date_format (shown on the field, e.g. DD/MM/YYYY); comb = string, one character per cell; checkbox = boolean; radio = option id or label, or the bare option text ("No" for "Smoke? No"); multiselect = array of those; table = {cellId: value}; table_rows = [{columnId: value}, …]; signature = {"image_path": "/abs/sig.png"} (PNG or JPG). A signature with signing_requirement "external" is signed outside fenfill (on paper or by e-sign) and stays blank.';
 
 const INSTRUCTIONS = [
   "fenfill turns blank PDF forms into fillable ones.",
   "Local file: analyze_form(path) returns the form's fields (the blank form is uploaded once; results are cached, repeat calls are free), then fill_form(path, values, output_path) fills it on this machine.",
   "Saved templates: list_templates → get_template → fill_template.",
   "preview_page shows a page with every field box outlined and tagged (rendered on this machine); edit_template fixes a misplaced, missing or mislabeled field locally; save_template keeps the fix in a saved template.",
+  "A saved template's page that was never analyzed (get_template unanalyzed_pages) or came out badly: reanalyze_template re-runs fenfill on just those pages, from the PDF already stored with it.",
   "Fill values never leave this machine: they are not sent to fenfill or anywhere else.",
 ].join(" ");
 
@@ -270,6 +278,9 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
   // Free-text answers seen this session, for save_template's echo guard.
   // In memory only (echo.ts).
   const echo = new EchoGuard();
+
+  /** preview_page legend fingerprints by target + page, for legend: "changed" (this process only). */
+  const lastLegend = new Map<string, Map<string, string>>();
 
   // ---- local working copies (edit_template) ----------------------------------------
 
@@ -603,7 +614,8 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "list_templates",
     {
       title: "List saved templates",
-      description: "List the workspace's saved fenfill templates, newest first.",
+      description:
+        "List the workspace's saved fenfill templates, newest first. analyzed_pages lists the pages fenfill analyzed: a page missing from it (compare page_count) was never analyzed, so it has no fields yet (reanalyze_template fixes that).",
       inputSchema: {
         limit: z
           .number()
@@ -628,7 +640,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     {
       title: "Get a template's fields",
       description:
-        "Get a saved template's fillable fields (ids, types, labels) for fill_template. Use pages to narrow a large form.",
+        "Get a saved template's fillable fields (ids, types, labels) for fill_template. Use pages to narrow a large form. unanalyzed_pages (when present) lists pages fenfill never analyzed: they have no fields yet; reanalyze_template with kind scratch analyzes them.",
       inputSchema: { template_id: TEMPLATE_ID, pages: PAGES },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -638,14 +650,23 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         { signal },
       );
       const requested = pages?.trim() ? parsePageSpec(pages) : null;
+      const { unanalyzed } = analyzedPagesOf(body);
       return {
         template_id: body.template_id ?? template_id,
+        ...(unanalyzed.length
+          ? {
+              unanalyzed_pages: unanalyzed,
+              unanalyzed_note:
+                'These pages were never analyzed, so they have no fields yet. reanalyze_template {template_id, pages, kind: "scratch"} analyzes them (1 page scan per page).',
+            }
+          : {}),
         ...((await templateEdits(template_id))
           ? {
+              has_local_edits: true,
               local_edits:
                 "This template has local edits (edit_template) that fill_template and preview_page use; the fields listed are fenfill's saved version. save_template keeps them; edit_template with discard: true drops them.",
             }
-          : {}),
+          : { has_local_edits: false }),
         ...compactView(
           body,
           requested,
@@ -723,14 +744,12 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "preview_page",
     {
       title: "Preview a page with its field boxes",
-      description: `Render one page as a PNG image with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label and box (fractions of the page, top-left origin: the coordinates edit_template uses), and the page's placement warnings. Pass values to see them stamped, in exactly fill_form's shapes (see fill_form; e.g. table_rows = [{columnId: value}, …], multiselect = array of option ids or labels). Use it to check placement before or after edit_template. It renders the local working copy (edit_template) when one exists, otherwise the saved template or analyzed version; the result's edited: true/false says which. Rendered entirely on this machine: nothing is written to disk, the values are never sent anywhere, and the image goes only to you. On a saved template the blank PDF is downloaded once.`,
+      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin, as edit_template uses), format and font_pt; options, table cells (row, col) and table_rows columns with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: much larger text than the page's other fields, a box over printed text (not on scans), a box past its ruled cell. Use it as a read-only placement audit. values (see that parameter) stamp test values. crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now inside a table or group). It renders the local working copy (edit_template) when one exists, else the saved or analyzed version (edited: true/false). Rendered on this machine: nothing is written to disk and the values are never sent anywhere.`,
       inputSchema: {
         path: TARGET_PATH,
         template_id: TARGET_TEMPLATE,
         page: z.number().int().min(1).max(100_000).describe("1-based page number."),
-        values: VALUES.optional().describe(
-          "Optional: field id → value, exactly as for fill_form (see its description).",
-        ),
+        values: VALUES.optional().describe(`Optional, exactly as for fill_form: ${VALUE_SHAPES}`),
         dpi: z
           .number()
           .int()
@@ -738,6 +757,29 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .max(MAX_DPI)
           .optional()
           .describe(`Resolution (default ${String(DEFAULT_DPI)}, max ${String(MAX_DPI)}).`),
+        crop: z
+          .object({
+            x: z.number().min(0).max(1),
+            y: z.number().min(0).max(1),
+            w: z.number().gt(0).max(1),
+            h: z.number().gt(0).max(1),
+          })
+          .optional()
+          .describe(
+            "Optional: render only this region of the page (fractions, top-left origin, like the legend boxes), magnified by zoom. The legend then lists only what the region shows.",
+          ),
+        zoom: z
+          .number()
+          .min(1)
+          .max(MAX_ZOOM)
+          .optional()
+          .describe(`With crop: magnification (default 2, max ${String(MAX_ZOOM)}).`),
+        legend: z
+          .enum(["all", "changed", "none"])
+          .optional()
+          .describe(
+            'Which legend rows to return: "all" (default), "changed" (only what changed since your last preview of this page, or, the first time, since fenfill\'s version; plus removed ids), or "none".',
+          ),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -751,14 +793,17 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         let bytes: Uint8Array;
         let render: RenderSchema;
         let wc: WorkingCopy | null;
+        let legendKey: string;
         if (args.path) {
           const f = await fileForm(args.path);
+          legendKey = `file:${f.sha}`;
           await cache.touchForm(f.sha);
           wc = await fileEdits(f);
           bytes = f.bytes;
           render = wc ? wc.render : f.merged.render;
         } else {
           const id = args.template_id as string;
+          legendKey = `template:${id}`;
           wc = await templateEdits(id);
           render = wc ? wc.render : (await fetchTemplate(id, signal)).render;
           bytes = await templateBlank(id, signal);
@@ -771,7 +816,37 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           values,
           dpi: args.dpi,
           fonts: loadFonts(opts.fontsDir),
+          crop: args.crop,
+          zoom: args.zoom,
         });
+        // Placement over every box the page (or crop) shows: a gold review
+        // must see a box sitting on a printed hint before it edits anything.
+        const placement = await placementWarnings(
+          bytes,
+          render,
+          pv.legend.map((r) => r.id),
+          { pageWide: true, cells: true },
+        ).catch(() => []);
+        // Resolved font sizes for the legend's single-line fields.
+        const sizes = await stampedSizes(bytes, render, args.page).catch(
+          () => new Map<string, { font_pt: number; font_auto: boolean }>(),
+        );
+        for (const row of pv.legend) Object.assign(row, sizes.get(row.id) ?? {});
+        // legend: "changed" diffs this page's rows against the last preview of
+        // it (in this session), or the first time against fenfill's version.
+        const key = `${legendKey}#${String(args.page)}`;
+        const full = legendRows(render, args.page);
+        const before =
+          lastLegend.get(key) ?? legendPrints(wc ? legendRows(wc.base, args.page) : full);
+        lastLegend.set(key, legendPrints(full));
+        const mode = args.legend ?? "all";
+        const shownIds = new Set(pv.legend.map((r) => r.id));
+        const diff = mode === "changed" ? legendChanges(before, full) : null;
+        const changes = diff && {
+          changed: diff.changed.filter((r) => shownIds.has(r.id)),
+          removed: diff.removed,
+          moved_into: diff.moved_into,
+        };
         const meta = {
           page: args.page,
           width: pv.width,
@@ -785,10 +860,22 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
               }),
           colours:
             "green = filled, orange = filled with a warning, red = skipped, grey dashed = empty; a radio/multiselect option has a thin box tagged below it",
-          legend: pv.legend,
+          ...(args.crop ? { crop: args.crop } : {}),
+          ...(mode === "none"
+            ? {}
+            : changes
+              ? {
+                  legend: changes.changed,
+                  legend_mode: "changed",
+                  ...(changes.removed.length ? { removed: changes.removed } : {}),
+                  ...(changes.moved_into.length ? { moved_into: changes.moved_into } : {}),
+                }
+              : { legend: pv.legend }),
           ...(Object.keys(values).length ? { filled: pv.filled } : {}),
           ...(pv.skipped.length ? { skipped: pv.skipped } : {}),
-          ...(pv.warnings.length ? { warnings: pv.warnings } : {}),
+          // Always present: [] means checked and clean, never "not computed".
+          warnings: pv.warnings,
+          placement_warnings: placement,
         };
         log("info", "tool ok", { tool: "preview_page", ms: Date.now() - t0 });
         return {
@@ -810,7 +897,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "edit_template",
     {
       title: "Correct a form's fields locally",
-      description: `Correct a form's fields on this machine: move, resize, relabel, retype, add, delete or regroup fields of an analyzed PDF (path) or a saved template (template_id). Edits go to a local working copy that fill_form, fill_template and preview_page use at once; nothing is sent until save_template, and then only the layout and the form's wording. Labels, descriptions, placeholders and options hold the FORM's own wording (its captions and instructions), never the user's answers: answers go only in fill values. Ids are the ones analyze_form / get_template / preview_page show (an option or table cell id addresses that box). Coordinates are fractions of the page (0–1), top-left origin, x right, y down; preview_page's legend shows every box. Returns applied, rejected [{op_index, reason}], diff_summary and warnings. Edits to an unsaved analysis stay local: to keep corrections, analyze_form with save_as_template: true and edit that template.`,
+      description: `Correct a form's fields on this machine: move, resize, relabel, retype, add, delete or regroup fields of an analyzed PDF (path) or a saved template (template_id). Edits go to a local working copy that fill_form, fill_template and preview_page use at once; nothing is sent until save_template, and then only the layout and the form's wording. Labels, descriptions, placeholders and options hold the FORM's own wording (its captions and instructions), never the user's answers: answers go only in fill values. Ids are the ones analyze_form / get_template / preview_page show (an option or table cell id addresses that box); any id may be shortened to an unambiguous prefix of 6+ characters, like the preview tags. Coordinates are fractions of the page (0–1), top-left origin, x right, y down; preview_page's legend shows every box. Returns applied, rejected [{op_index, reason}], diff_summary (ops: snapped, noop per op) and warnings ([] = none; placement checks touched boxes: oversized text, over printed text, past the ruled cell). Edits to an unsaved analysis stay local: to keep corrections, analyze_form with save_as_template: true and edit that template.`,
       inputSchema: {
         path: TARGET_PATH,
         template_id: TARGET_TEMPLATE,
@@ -818,7 +905,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .array(z.record(z.string(), z.unknown()))
           .max(MAX_OPS)
           .describe(
-            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine): set_box {id, x, y, w, h} (absolute top-left + size in one step; a group scales its members); move {id, dx, dy} or {id, x, y} (new top-left); resize {id, w, h} (keeps the top-left; a group scales its members); relabel {id, label}; retype {id, type: text|multiline|date|checkbox|signature} (a radio/multiselect group: radio|multiselect); add {page, type, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?} (diff_summary.added gives the new id); delete {id}; set_format {id, format: {...}} (a field's format keys, e.g. font_size, text_anchor, date_format, variant; null removes one; a comb group: cell_type, date_format); group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears). Table rows/columns can't be added or removed yet.`,
+            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type, date_format with one D/M/Y letter per cell); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where the first sat (stamps order; geometry no longer decides). Every cell of one column (or row, when orientation is row) has one type.`,
           ),
         discard: z
           .boolean()
@@ -843,8 +930,10 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         sha: string | null;
       }>;
       let fileSha: string | null = null;
+      let fileBytes: Uint8Array | null = null;
       if (path) {
         const f = await fileForm(path);
+        fileBytes = f.bytes;
         if (f.templateId) {
           // The file is wholly one saved template: edit that template, based
           // on fenfill's copy exactly as served (what save_template sends back).
@@ -896,9 +985,38 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           writer,
         };
       }
+      // The blank PDF (snap and the placement warnings read its render and text
+      // layer, locally): the file itself, or the saved template's, downloaded once.
+      const target = saveTarget;
+      let blankBytes: Promise<Uint8Array> | null = null;
+      const blank = () =>
+        (blankBytes ??= fileBytes
+          ? Promise.resolve(fileBytes)
+          : templateBlank(target as string, signal));
+      const pages = snapPages(ops, (id) => pageOfId(wc.render, id));
+      let snap: Snapper | undefined;
+      if (pages.length) {
+        try {
+          snap = await prepareSnapper(await blank(), pages);
+        } catch (e) {
+          if (e instanceof ToolError && e.code === "invalid_page") throw e;
+          const why = asToolError(e).message;
+          snap = () => ({ none: `no page render (${why})` });
+        }
+      }
       // The echo guard runs per op, before anything is written: an op whose
       // wording repeats an answer of this session is rejected.
-      const r = applyOps(wc.render, ops, (w) => echo.check(w));
+      const r = applyOps(wc.render, ops, (w) => echo.check(w), { snap });
+      let placement: string[] = [];
+      if (r.applied > 0) {
+        const ids = [
+          ...r.diff_summary.touched.map((t) => t.id),
+          ...r.diff_summary.added.map((a) => a.id),
+        ];
+        placement = await blank()
+          .then((pdf) => placementWarnings(pdf, r.render, ids, { cells: true }))
+          .catch(() => []);
+      }
       // Taking over a copy whose changed wording another process wrote: that
       // wording stays unvouched until save_template's confirm_wording.
       const inherited =
@@ -930,6 +1048,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         ...(discard === true ? { discarded } : {}),
         warnings: [
           ...r.warnings,
+          ...placement,
           ...left.map(
             (i) =>
               `${i.id ? `${i.id}: ` : ""}${i.path} ${i.reason} (fenfill would refuse to save this; fix it with another op)`,
@@ -971,9 +1090,13 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     run("save_template", async ({ template_id, confirm_wording }, _extra, signal) => {
       const wc = await templateEdits(template_id);
       if (!wc) {
-        throw new ToolError("no_local_edits", "There are no local edits for this template.", {
-          hint: "edit_template with template_id (or with the path of a PDF saved as this template) makes some. Edits to an unsaved analysis can't be saved: analyze_form with save_as_template: true first, then edit that template.",
-        });
+        // Nothing to save is a success, not an error: fenfill's copy is already current.
+        return {
+          template_id,
+          saved: false,
+          nothing_to_save: true,
+          note: "No local edits for this template: fenfill's copy is already the current one (e.g. right after a save or reanalyze_template, or before any edit_template). Edits to an unsaved analysis can't be saved: analyze_form with save_as_template: true first, then edit that template.",
+        };
       }
 
       // 1. The echo guard: wording that repeats an answer never leaves.
@@ -1077,7 +1200,17 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         template_id: saved.template_id ?? template_id,
         saved: true,
         updated_at: saved.updated_at,
-        field_count: Array.isArray(saved.result?.fields) ? saved.result.fields.length : undefined,
+        // Agent entries (get_template's unit) of the whole saved template.
+        ...(() => {
+          try {
+            const n = agentEntries(
+              normalizeSchema(saved.result as unknown as Parameters<typeof normalizeSchema>[0]),
+            ).length;
+            return { field_count: n, field_count_total: n };
+          } catch {
+            return {};
+          }
+        })(),
         ...(echoed.warn.length
           ? {
               warnings: [
@@ -1087,6 +1220,81 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           : {}),
         next: "fill_template, get_template and recipient links now use the saved layout.",
       };
+    }),
+  );
+
+  // ---- reanalyze_template ------------------------------------------------------------------
+  server.registerTool(
+    "reanalyze_template",
+    {
+      title: "Re-analyze pages of a saved template",
+      description:
+        'Re-run fenfill\'s analysis on some pages of a SAVED template, using the blank PDF already stored with it (nothing is uploaded). Spot never-analyzed pages with get_template (unanalyzed_pages) or list_templates (analyzed_pages vs page_count). kind: "scratch" (default; only allowed when the pages have no fields) analyzes a never-analyzed page, or replaces a badly analyzed one\'s fields; "find" adds blanks the first pass missed and keeps everything else; "relabel" re-derives labels, types, groups and sections keeping the boxes (relabel may reset table column types/orientation; check get_template after); "label_missing" fills in only missing labels. Cost: 1 page scan per page; label_missing is free within the workspace\'s monthly free-label allowance. Pass estimate: true first to price it (starts nothing). Unsaved local edits (edit_template) must be saved (save_template) or dropped (discard: true) first. Returns the pages\' changes (added / removed / changed fields) and their new fields. If it returns status "running", call it again with the same arguments (no extra charge). A rate-limit or busy refusal is waited out automatically (up to about a minute).',
+      inputSchema: {
+        template_id: TEMPLATE_ID,
+        pages: z
+          .string()
+          .min(1)
+          .max(2000)
+          .describe('1-based pages to re-analyze, e.g. "2" or "2-4".'),
+        kind: z
+          .enum(RERUN_KINDS)
+          .optional()
+          .describe(
+            "scratch | find | relabel | label_missing (see the description). Omit only for pages with no fields (= scratch).",
+          ),
+        estimate: z
+          .boolean()
+          .optional()
+          .describe(
+            "Only price it: returns {cost, scans_left, free_label_pages, insufficient, …} and starts nothing.",
+          ),
+        discard: z
+          .boolean()
+          .optional()
+          .describe(
+            "Drop this template's unsaved local edits (edit_template) when the re-analysis finishes, instead of refusing.",
+          ),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    run("reanalyze_template", async (args, extra, signal) => {
+      const token = extra._meta?.progressToken;
+      const progress =
+        token !== undefined
+          ? async (p: number, message?: string) => {
+              await extra.sendNotification({
+                method: "notifications/progress",
+                params: {
+                  progressToken: token,
+                  progress: p,
+                  total: 100,
+                  ...(message ? { message } : {}),
+                },
+              });
+            }
+          : undefined;
+      return reanalyzeTemplate(
+        {
+          cache,
+          api,
+          identity,
+          now,
+          sleep,
+          waitSeconds: waitSecondsFromEnv(env),
+          posts,
+          owner,
+          templateEdits,
+          dropFileCopies: (tid) => dropFileCopies(tid, null),
+        },
+        args,
+        { signal, progress },
+      );
     }),
   );
 

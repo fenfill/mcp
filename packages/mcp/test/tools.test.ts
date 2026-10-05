@@ -160,6 +160,14 @@ describe("preview_page", () => {
     expect(name.box.x).toBeCloseTo(0.1);
     expect(nameId.startsWith(name.tag)).toBe(true);
     expect(meta.filled).toBe(1);
+    // Always present, so [] reads as "checked, clean", never "not computed".
+    const raw = JSON.parse(r.content[1].text!) as Record<string, unknown>;
+    expect(Array.isArray(raw.warnings)).toBe(true);
+    expect(Array.isArray(raw.placement_warnings)).toBe(true);
+    // A single-line text field reports the size its value starts at.
+    const nameRow = (raw.legend as Record<string, unknown>[]).find((l) => l.id === nameId)!;
+    expect(typeof nameRow.font_pt).toBe("number");
+    expect(typeof nameRow.font_auto).toBe("boolean");
 
     expect(mock.calls.length).toBe(before); // no request
     expect(walk(t.dir).sort()).toEqual(filesBefore); // nothing written
@@ -220,12 +228,40 @@ describe("edit_template → fill/preview → save_template", () => {
     });
     expect(f.isError).toBe(false);
     expect(f.data).toMatchObject({ edited: true, filled: 2 });
-    expect(await extractStampedText(new Uint8Array(readFileSync(out)), 1)).toContain("2026-10-04");
+    // A date stamps in the field's date_format (DD/MM/YYYY for a new date field).
+    expect(await extractStampedText(new Uint8Array(readFileSync(out)), 1)).toContain("04/10/2026");
 
     const pv = await preview(c, { template_id: TPL, page: 2 });
     const meta = JSON.parse(pv.content[1].text!) as { edited: boolean; legend: { id: string }[] };
     expect(meta.edited).toBe(true);
     expect(meta.legend.map((l) => l.id)).toContain(added);
+    // legend: "changed" — nothing since that preview; then just the relabeled field.
+    const same = await preview(c, { template_id: TPL, page: 2, legend: "changed" });
+    expect(JSON.parse(same.content[1].text!)).toMatchObject({ legend: [], legend_mode: "changed" });
+    await c.call("edit_template", {
+      template_id: TPL,
+      ops: [{ op: "relabel", id: added.slice(0, 8), label: "Date of signature" }],
+    });
+    const changed = await preview(c, { template_id: TPL, page: 2, legend: "changed" });
+    const cm = JSON.parse(changed.content[1].text!) as { legend: { id: string; label: string }[] };
+    expect(cm.legend.map((l) => [l.id, l.label])).toEqual([[added, "Date of signature"]]);
+    // crop: a region at zoom 2 renders that region's pixels and lists only its rows.
+    const full = await preview(c, { template_id: TPL, page: 2, dpi: 72, legend: "none" });
+    const crop = await preview(c, {
+      template_id: TPL,
+      page: 2,
+      dpi: 72,
+      crop: { x: 0.5, y: 0.8, w: 0.5, h: 0.2 },
+      zoom: 2,
+    });
+    const fd = pngDims(full.content[0].data!);
+    const cd = pngDims(crop.content[0].data!);
+    expect(cd.w).toBeCloseTo(fd.w, -1); // half the width at twice the scale
+    expect(cd.h).toBeCloseTo(fd.h * 0.4, -1);
+    expect("legend" in JSON.parse(full.content[1].text!)).toBe(false);
+    const cl = JSON.parse(crop.content[1].text!) as { legend: { id: string }[]; dpi: number };
+    expect(cl.dpi).toBe(144);
+    expect(cl.legend.map((l) => l.id)).toEqual([added]);
 
     const s = await c.call("save_template", { template_id: TPL });
     expect(s.isError).toBe(false);
@@ -241,7 +277,7 @@ describe("edit_template → fill/preview → save_template", () => {
     expect(walk(join(cacheDir, "edits"))).toHaveLength(0); // cleared
 
     const again = await c.call("save_template", { template_id: TPL });
-    expect(again.data.error).toMatchObject({ code: "no_local_edits" });
+    expect(again.data).toMatchObject({ saved: false, nothing_to_save: true });
   });
 
   it("409 keeps the local edits and reports the current version; discard starts over", async () => {
@@ -327,8 +363,8 @@ describe("edit_template → fill/preview → save_template", () => {
     const again = await c.call("analyze_form", { path: pdfPath });
     expect(again.data.local_edits).toBeTruthy();
     const s = await c.call("save_template", { template_id: TPL });
-    expect(s.data.error).toMatchObject({ code: "no_local_edits" });
-    expect(String((s.data.error as { hint: string }).hint)).toMatch(/save_as_template: true/);
+    expect(s.data).toMatchObject({ saved: false, nothing_to_save: true });
+    expect(String(s.data.note)).toMatch(/save_as_template: true/);
   });
 
   it("caps ops at 200 per call", async () => {

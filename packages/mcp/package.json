@@ -1,6 +1,6 @@
 {
   "name": "@fenfill/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "fenfill MCP server: analyze blank PDF forms with fenfill and fill them locally, so your answers never leave your machine.",
   "license": "MIT",
   "author": "fenfill",

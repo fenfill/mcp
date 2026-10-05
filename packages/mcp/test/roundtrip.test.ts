@@ -20,11 +20,11 @@ afterEach(async () => {
 });
 
 describe("InMemoryTransport round trip", () => {
-  it("lists exactly the eleven tools, with annotations and no outputSchema", async () => {
+  it("lists exactly the twelve tools, with annotations and no outputSchema", async () => {
     c = await connect({ env: env(join(t.dir, "cache")), fetchImpl: new MockApi().fetch });
     const { tools } = await c.client.listTools();
     expect(tools.map((x) => x.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(tools).toHaveLength(11);
+    expect(tools).toHaveLength(12);
     expect(tools.map((x) => x.name)).not.toContain("make_fillable");
     for (const tool of tools) {
       expect(tool.description, tool.name).toBeTruthy();
@@ -42,7 +42,7 @@ describe("InMemoryTransport round trip", () => {
         "option id or label",
         "bare option text",
         "stamped exactly as given",
-        "printed as YYYY-MM-DD",
+        "printed in the field's date_format",
         'signing_requirement "external"',
         "{cellId: value}",
         "image_path",
@@ -57,6 +57,24 @@ describe("InMemoryTransport round trip", () => {
     expect(byName.preview_page.description).toMatch(/nothing is written to disk/);
     expect(byName.edit_template.description).toMatch(/never the user's answers/);
     expect(byName.save_template.description).toMatch(/never fill values/);
+    const re = byName.reanalyze_template.description!;
+    for (const must of [
+      /unanalyzed_pages/,
+      /analyzed_pages vs page_count/,
+      /"scratch"/,
+      /"find"/,
+      /"relabel"/,
+      /"label_missing"/,
+      /1 page scan per page/,
+      /free-label allowance/,
+      /estimate: true/,
+      /nothing is uploaded/,
+      /relabel may reset table column types\/orientation; check get_template after/,
+      /save_template\) or dropped \(discard: true\)/,
+    ]) {
+      expect(re).toMatch(must);
+    }
+    expect(byName.reanalyze_template.inputSchema.properties).toHaveProperty("kind");
     expect(c.client.getServerVersion()?.name).toBe("fenfill");
     expect(c.client.getInstructions()).toMatch(/never leave this machine/);
   });

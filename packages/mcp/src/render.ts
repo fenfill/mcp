@@ -74,8 +74,22 @@ export interface Raster {
   rgba: Uint8Array;
 }
 
-/** Render one page (1-based) of an in-memory PDF to RGBA pixels on white. */
-export async function renderPage(pdf: Uint8Array, page: number, dpi: number): Promise<Raster> {
+/** A region of the page in fractions, top-left origin. */
+export interface Region {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+type Module = Pdfium;
+
+/** Open one page (1-based) of an in-memory PDF, run `fn`, and free everything. */
+async function withPage<T>(
+  pdf: Uint8Array,
+  page: number,
+  fn: (m: Module, pg: number, heap: () => Uint8Array) => T,
+): Promise<T> {
   const m = await pdfium();
   const p = m.pdfium;
   // The Emscripten heap view (typed loosely upstream); re-read after every
@@ -85,7 +99,6 @@ export async function renderPage(pdf: Uint8Array, page: number, dpi: number): Pr
   if (!ptr) throw new ToolError("render_failed", "Not enough memory to render this page.");
   let doc = 0;
   let pg = 0;
-  let bmp = 0;
   try {
     heap().set(pdf, ptr);
     doc = m.FPDF_LoadMemDocument(ptr, pdf.length, "");
@@ -102,33 +115,108 @@ export async function renderPage(pdf: Uint8Array, page: number, dpi: number): Pr
     }
     pg = m.FPDF_LoadPage(doc, page - 1);
     if (!pg) throw new ToolError("render_failed", "The page renderer couldn't load this page.");
-    const wPt = m.FPDF_GetPageWidthF(pg);
-    const hPt = m.FPDF_GetPageHeightF(pg);
-    let scale = dpi / 72;
-    const longest = Math.max(wPt, hPt) * scale;
-    if (longest > MAX_SIDE_PX) scale *= MAX_SIDE_PX / longest;
-    const width = Math.max(1, Math.round(wPt * scale));
-    const height = Math.max(1, Math.round(hPt * scale));
-    bmp = m.FPDFBitmap_Create(width, height, 0);
-    if (!bmp) throw new ToolError("render_failed", "Not enough memory to render this page.");
-    m.FPDFBitmap_FillRect(bmp, 0, 0, width, height, 0xffffffff);
-    m.FPDF_RenderPageBitmap(bmp, pg, 0, 0, width, height, 0, FPDF_ANNOT | FPDF_REVERSE_BYTE_ORDER);
-    const stride = m.FPDFBitmap_GetStride(bmp);
-    const buf = m.FPDFBitmap_GetBuffer(bmp);
-    // Copy out (the wasm heap may grow and move on the next call).
-    const rgba = new Uint8Array(width * 4 * height);
-    const h8 = heap();
-    for (let y = 0; y < height; y++) {
-      const row = buf + y * stride;
-      rgba.set(h8.subarray(row, row + width * 4), y * width * 4);
-    }
-    return { width, height, rgba };
+    return fn(m, pg, heap);
   } finally {
-    if (bmp) m.FPDFBitmap_Destroy(bmp);
     if (pg) m.FPDF_ClosePage(pg);
     if (doc) m.FPDF_CloseDocument(doc);
     p.wasmExports.free(ptr);
   }
+}
+
+/**
+ * Render one page (1-based) of an in-memory PDF to RGBA pixels on white; with
+ * `crop`, only that region of the page (at the same dpi). The longest output
+ * side is capped at MAX_SIDE_PX.
+ */
+export async function renderPage(
+  pdf: Uint8Array,
+  page: number,
+  dpi: number,
+  crop?: Region,
+): Promise<Raster> {
+  return withPage(pdf, page, (m, pg, heap) => {
+    const wPt = m.FPDF_GetPageWidthF(pg);
+    const hPt = m.FPDF_GetPageHeightF(pg);
+    const c = crop ?? { x: 0, y: 0, w: 1, h: 1 };
+    let scale = dpi / 72;
+    const longest = Math.max(wPt * c.w, hPt * c.h) * scale;
+    if (longest > MAX_SIDE_PX) scale *= MAX_SIDE_PX / longest;
+    const fullW = Math.max(1, Math.round(wPt * scale));
+    const fullH = Math.max(1, Math.round(hPt * scale));
+    const x0 = Math.round(c.x * fullW);
+    const y0 = Math.round(c.y * fullH);
+    const width = Math.max(1, Math.min(fullW - x0, Math.round(c.w * fullW)));
+    const height = Math.max(1, Math.min(fullH - y0, Math.round(c.h * fullH)));
+    const bmp = m.FPDFBitmap_Create(width, height, 0);
+    if (!bmp) throw new ToolError("render_failed", "Not enough memory to render this page.");
+    try {
+      m.FPDFBitmap_FillRect(bmp, 0, 0, width, height, 0xffffffff);
+      // A crop renders the whole page shifted by (-x0, -y0) into a region-sized bitmap.
+      m.FPDF_RenderPageBitmap(
+        bmp,
+        pg,
+        -x0,
+        -y0,
+        fullW,
+        fullH,
+        0,
+        FPDF_ANNOT | FPDF_REVERSE_BYTE_ORDER,
+      );
+      const stride = m.FPDFBitmap_GetStride(bmp);
+      const buf = m.FPDFBitmap_GetBuffer(bmp);
+      // Copy out (the wasm heap may grow and move on the next call).
+      const rgba = new Uint8Array(width * 4 * height);
+      const h8 = heap();
+      for (let y = 0; y < height; y++) {
+        const row = buf + y * stride;
+        rgba.set(h8.subarray(row, row + width * 4), y * width * 4);
+      }
+      return { width, height, rgba };
+    } finally {
+      m.FPDFBitmap_Destroy(bmp);
+    }
+  });
+}
+
+export interface PageText {
+  widthPt: number;
+  heightPt: number;
+  /** Printed glyph boxes (whitespace skipped), fractions of the page, top-left origin. */
+  glyphs: (Region & { char: string })[];
+}
+
+/** The page's size in points and its text layer's glyph boxes (none on a scan). */
+export async function pageText(pdf: Uint8Array, page: number): Promise<PageText> {
+  return withPage(pdf, page, (m, pg, heap) => {
+    const widthPt = m.FPDF_GetPageWidthF(pg);
+    const heightPt = m.FPDF_GetPageHeightF(pg);
+    const glyphs: PageText["glyphs"] = [];
+    const tp = m.FPDFText_LoadPage(pg);
+    if (!tp) return { widthPt, heightPt, glyphs };
+    const p = m.pdfium;
+    const out = p.wasmExports.malloc(32);
+    try {
+      const n = m.FPDFText_CountChars(tp);
+      for (let i = 0; i < n; i++) {
+        const u = m.FPDFText_GetUnicode(tp, i);
+        if (u <= 32 || u === 0xa0 || u === 0xfffe || u === 0xffff) continue;
+        if (!m.FPDFText_GetCharBox(tp, i, out, out + 8, out + 16, out + 24)) continue;
+        const [left, right, bottom, top] = new Float64Array(heap().buffer, out, 4);
+        if (!(right > left) || !(top > bottom)) continue;
+        glyphs.push({
+          x: left / widthPt,
+          y: (heightPt - top) / heightPt, // PDF space is bottom-left: invert Y
+          w: (right - left) / widthPt,
+          h: (top - bottom) / heightPt,
+          char: String.fromCodePoint(u),
+        });
+      }
+    } finally {
+      p.wasmExports.free(out);
+      m.FPDFText_ClosePage(tp);
+    }
+    return { widthPt, heightPt, glyphs };
+  });
 }
 
 // ---- PNG -----------------------------------------------------------------------------------

@@ -1,0 +1,343 @@
+{
+  "version": 5,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p1.webp",
+      "sections": []
+    }
+  ],
+  "fields": [
+    {
+      "id": "ffb3a3e7-95f1-5573-8140-d59a4a2f666a",
+      "label": "R1 C1",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 20,
+      "wpct": 18,
+      "hpct": 3.5,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "391f4376-9964-5238-bb76-582e8a0772f7"
+    },
+    {
+      "id": "b8e28281-b29d-5c01-9389-9de5b72fde4b",
+      "label": "R1 C2",
+      "type": "date",
+      "page": 1,
+      "section_id": null,
+      "xpct": 30,
+      "ypct": 20,
+      "wpct": 18,
+      "hpct": 3.5,
+      "cells": [],
+      "format": {
+        "date_format": "DD/MM/YYYY"
+      },
+      "group": "391f4376-9964-5238-bb76-582e8a0772f7"
+    },
+    {
+      "id": "770f2ddb-8d42-5366-8fd7-ee1f1a783cc7",
+      "label": "R1 C3",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 50,
+      "ypct": 20,
+      "wpct": 18,
+      "hpct": 3.5,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "391f4376-9964-5238-bb76-582e8a0772f7"
+    },
+    {
+      "id": "bdf33456-89b9-5d09-8f18-3d6263b57d35",
+      "label": "R2 C1",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 24,
+      "wpct": 18,
+      "hpct": 3.5,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "391f4376-9964-5238-bb76-582e8a0772f7"
+    },
+    {
+      "id": "4fe464f2-2277-5d8c-9eec-bcc1faa91a9a",
+      "label": "R2 C2",
+      "type": "date",
+      "page": 1,
+      "section_id": null,
+      "xpct": 30,
+      "ypct": 24,
+      "wpct": 18,
+      "hpct": 3.5,
+      "cells": [],
+      "format": {
+        "date_format": "DD/MM/YYYY"
+      },
+      "group": "391f4376-9964-5238-bb76-582e8a0772f7"
+    },
+    {
+      "id": "a264addd-47e4-5cf5-874e-6c8986cb8af3",
+      "label": "Q1 score 1",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 60,
+      "ypct": 50,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "group": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb"
+    },
+    {
+      "id": "eb6c5ef6-d396-5284-9233-d42dd119fc88",
+      "label": "Q1 score 2",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 65,
+      "ypct": 50,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "group": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb"
+    },
+    {
+      "id": "8ee445aa-bae6-5a44-a944-e8de3c170637",
+      "label": "Q1 score 3",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 70,
+      "ypct": 50,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "group": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb"
+    },
+    {
+      "id": "d23557aa-23c3-5227-a598-189faa5a5095",
+      "label": "Q2 score 1",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 60,
+      "ypct": 54,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "group": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb"
+    },
+    {
+      "id": "a11f1f01-cf9d-5fad-8269-a722cb72d6e7",
+      "label": "Q2 score 2",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 65,
+      "ypct": 54,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "group": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb"
+    },
+    {
+      "id": "33aef921-55da-5bf0-a5ee-0d65a4508db4",
+      "label": "Q2 score 3",
+      "type": "checkbox",
+      "page": 1,
+      "section_id": null,
+      "xpct": 70,
+      "ypct": 54,
+      "wpct": 2,
+      "hpct": 2,
+      "cells": [],
+      "group": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb"
+    },
+    {
+      "id": "dd6d5149-a8e0-5546-8d72-a94d9b0d689e",
+      "label": "Legacy 0",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 70,
+      "wpct": 15,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac"
+    },
+    {
+      "id": "cdd1e1aa-7857-5f20-8232-ff5d6b486bc1",
+      "label": "Legacy 1",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 30,
+      "ypct": 70.4,
+      "wpct": 15,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac"
+    },
+    {
+      "id": "c015e8ef-3e22-5239-b1b6-e45f685c85fa",
+      "label": "Legacy 2",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 50,
+      "ypct": 69.8,
+      "wpct": 15,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac"
+    },
+    {
+      "id": "042059a1-8a21-50ad-82d2-252ab4d9ef79",
+      "label": "Legacy 3",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10.5,
+      "ypct": 75,
+      "wpct": 15,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac"
+    },
+    {
+      "id": "0a7a54eb-302b-5f04-aca0-3b72a204eb2d",
+      "label": "Legacy 4",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 50.2,
+      "ypct": 75.3,
+      "wpct": 15,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac"
+    }
+  ],
+  "groups": [
+    {
+      "id": "391f4376-9964-5238-bb76-582e8a0772f7",
+      "kind": "table",
+      "format": "classic",
+      "label": "Children",
+      "page": 1,
+      "members": [
+        "ffb3a3e7-95f1-5573-8140-d59a4a2f666a",
+        "b8e28281-b29d-5c01-9389-9de5b72fde4b",
+        "770f2ddb-8d42-5366-8fd7-ee1f1a783cc7",
+        "bdf33456-89b9-5d09-8f18-3d6263b57d35",
+        "4fe464f2-2277-5d8c-9eec-bcc1faa91a9a"
+      ],
+      "orientation": "col",
+      "rows": 2,
+      "cols": 3,
+      "header_cols": [
+        "Name",
+        "Born",
+        "School"
+      ],
+      "header_rows": [
+        "",
+        ""
+      ],
+      "grid": [
+        [
+          "ffb3a3e7-95f1-5573-8140-d59a4a2f666a",
+          "b8e28281-b29d-5c01-9389-9de5b72fde4b",
+          "770f2ddb-8d42-5366-8fd7-ee1f1a783cc7"
+        ],
+        [
+          "bdf33456-89b9-5d09-8f18-3d6263b57d35",
+          "4fe464f2-2277-5d8c-9eec-bcc1faa91a9a",
+          null
+        ]
+      ]
+    },
+    {
+      "id": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb",
+      "kind": "table",
+      "format": "checkbox_matrix",
+      "label": "Satisfaction",
+      "page": 1,
+      "members": [
+        "a264addd-47e4-5cf5-874e-6c8986cb8af3",
+        "eb6c5ef6-d396-5284-9233-d42dd119fc88",
+        "8ee445aa-bae6-5a44-a944-e8de3c170637",
+        "d23557aa-23c3-5227-a598-189faa5a5095",
+        "a11f1f01-cf9d-5fad-8269-a722cb72d6e7",
+        "33aef921-55da-5bf0-a5ee-0d65a4508db4"
+      ],
+      "rows": 2,
+      "cols": 3,
+      "header_cols": [
+        "1",
+        "2",
+        "3"
+      ],
+      "header_rows": [
+        "Service",
+        "Price"
+      ],
+      "grid": [
+        [
+          "a264addd-47e4-5cf5-874e-6c8986cb8af3",
+          "eb6c5ef6-d396-5284-9233-d42dd119fc88",
+          "8ee445aa-bae6-5a44-a944-e8de3c170637"
+        ],
+        [
+          "d23557aa-23c3-5227-a598-189faa5a5095",
+          "a11f1f01-cf9d-5fad-8269-a722cb72d6e7",
+          "33aef921-55da-5bf0-a5ee-0d65a4508db4"
+        ]
+      ]
+    },
+    {
+      "id": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac",
+      "kind": "classic_table",
+      "label": "Legacy table",
+      "page": 1,
+      "members": [
+        "0a7a54eb-302b-5f04-aca0-3b72a204eb2d",
+        "042059a1-8a21-50ad-82d2-252ab4d9ef79",
+        "c015e8ef-3e22-5239-b1b6-e45f685c85fa",
+        "cdd1e1aa-7857-5f20-8232-ff5d6b486bc1",
+        "dd6d5149-a8e0-5546-8d72-a94d9b0d689e"
+      ]
+    }
+  ]
+}

@@ -2,7 +2,8 @@
 //
 // Ids are the agent ids analyze_form / get_template show: a field id, a
 // group id (radio/multiselect/comb/table), or an option / cell id (the member
-// fields of a group). Coordinates use the agent schema's box convention:
+// fields of a group). Any id may be shortened to an unambiguous prefix of at
+// least 6 characters, the length the check copy's tags show (doc.ts resolveId). Coordinates use the agent schema's box convention:
 // fractions 0–1 of the page, TOP-LEFT origin (x right, y down). The render
 // schema stores percent (0–100) of the page, also top-left; ×100 here.
 //
@@ -19,49 +20,72 @@
 import { randomUUID } from "node:crypto";
 
 import { buildFieldById, resolveMembers } from "@/app/t/[template_id]/fillCore";
+import { AUTOFILL_TOKENS, DATE_FORMATS } from "@/types";
 
+import {
+  bad,
+  bbox,
+  type Box,
+  boxArg,
+  checkFraction,
+  type Doc,
+  dropMembers,
+  type Field,
+  type Group,
+  index,
+  isRec,
+  members,
+  needField,
+  needGroup,
+  needId,
+  ON_PAGE,
+  OpError,
+  onPage,
+  pageOf,
+  removeFields,
+  removeGroup,
+  resolveId,
+  round,
+  transform,
+} from "./doc.js";
+import {
+  applyFormatToLine,
+  groupTable,
+  setColumnType,
+  setHeader,
+  setHeaders,
+  setOrientation,
+  tableAddCell,
+  tableAdopt,
+  tableDelete,
+  tableInsert,
+  tableIssues,
+  type TableOpResult,
+} from "./tables.js";
 import type { RenderSchema } from "./types.js";
 import { fieldIssues, formatIssues, groupIssues, type Issue } from "./validate.js";
 
+export type { Box } from "./doc.js";
+
 export const MAX_OPS = 200;
-
-type Field = RenderSchema["fields"][number] & {
-  label?: unknown;
-  type?: unknown;
-  format?: unknown;
-  section_id?: unknown;
-  xpct: number;
-  ypct: number;
-  wpct: number;
-  hpct: number;
-  cells?: { x: number; y: number; w: number; h: number }[];
-};
-type Group = RenderSchema["groups"][number] & {
-  kind?: unknown;
-  format?: unknown;
-  label?: unknown;
-  members?: unknown;
-  grid?: unknown;
-};
-
-export interface Box {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
 
 /** The field types an op may set (agent types; multiline = text + multiline variant). */
 export const EDIT_FIELD_TYPES = ["text", "multiline", "date", "checkbox", "signature"] as const;
 export type EditFieldType = (typeof EDIT_FIELD_TYPES)[number];
 
+/** Where `snap` looks for the blank a box belongs to, in the page render. */
+export const SNAP_MODES = ["underline", "cell", "answer"] as const;
+export type SnapMode = (typeof SNAP_MODES)[number];
+
+type Snap = { snap?: SnapMode };
+
 export type Op =
-  | { op: "move"; id: string; dx?: number; dy?: number; x?: number; y?: number }
+  | ({ op: "move"; id: string; dx?: number; dy?: number; x?: number; y?: number } & Snap)
   | { op: "resize"; id: string; w: number; h: number }
-  | { op: "set_box"; id: string; x: number; y: number; w: number; h: number }
+  | ({ op: "set_box"; id: string; x: number; y: number; w: number; h: number } & Snap)
   | { op: "relabel"; id: string; label: string }
   | { op: "retype"; id: string; type: string }
-  | {
+  | ({
       op: "add";
       page: number;
       type: EditFieldType;
@@ -71,19 +95,88 @@ export type Op =
       description?: string;
       placeholder?: string;
       required?: boolean;
-    }
+    } & Snap)
   | { op: "delete"; id: string }
   | { op: "set_format"; id: string; format: Record<string, unknown> }
   | { op: "group"; ids: string[]; kind: "choice" | "comb"; label: string; multiple?: boolean }
+  | {
+      op: "group";
+      kind: "table";
+      label: string;
+      cells?: (string | null)[][];
+      ids?: string[];
+      header_cols?: string[];
+      header_rows?: string[];
+      orientation?: "col" | "row";
+      format?: "classic" | "expandable" | "checkbox_matrix";
+    }
   | { op: "ungroup"; id: string }
   | { op: "set_options"; id: string; options: (string | { id: string; label: string })[] }
+  | { op: "add_option"; id: string; label: string; box: Box; index?: number }
+  | { op: "remove_option"; id: string; option: string }
   | { op: "set_required"; id: string; required: boolean }
   | { op: "set_description"; id: string; description: string | null }
-  | { op: "set_placeholder"; id: string; placeholder: string | null };
+  | { op: "set_placeholder"; id: string; placeholder: string | null }
+  | { op: "set_autofill"; id: string; autofill: string | null }
+  | {
+      op: "table_insert";
+      id: string;
+      axis: "row" | "col";
+      index: number;
+      box?: { x?: number; y?: number; w?: number; h?: number };
+      header?: string;
+      type?: string;
+      date_format?: string;
+    }
+  | { op: "table_delete"; id: string; axis: "row" | "col"; index: number; keep_cells?: boolean }
+  | { op: "table_add_cell"; id: string; row: number; col: number; box?: Box }
+  | { op: "table_adopt"; id: string; field: string; row: number; col: number }
+  | { op: "set_column_type"; id: string; index: number; type: string; date_format?: string }
+  | { op: "set_orientation"; id: string; orientation: "col" | "row" }
+  | { op: "set_header"; id: string; axis: "row" | "col"; index: number; text: string }
+  | { op: "set_headers"; id: string; axis: "row" | "col"; texts: string[]; start?: number }
+  | { op: "reorder"; page: number; ids: string[] };
+
+export const OP_NAMES = [
+  "move",
+  "resize",
+  "set_box",
+  "relabel",
+  "retype",
+  "add",
+  "delete",
+  "set_format",
+  "group",
+  "ungroup",
+  "set_options",
+  "add_option",
+  "remove_option",
+  "set_required",
+  "set_description",
+  "set_placeholder",
+  "set_autofill",
+  "table_insert",
+  "table_delete",
+  "table_add_cell",
+  "table_adopt",
+  "set_column_type",
+  "set_orientation",
+  "set_header",
+  "set_headers",
+  "reorder",
+] as const;
 
 export interface Rejected {
   op_index: number;
   reason: string;
+}
+
+/** One applied op: its kind, whether a requested snap landed, and whether it changed nothing. */
+export interface OpOutcome {
+  op_index: number;
+  op: string;
+  snapped?: boolean;
+  noop?: true;
 }
 
 export interface Touched {
@@ -105,109 +198,20 @@ export interface ApplyResult {
     added: { op_index: number; id: string }[];
     deleted: string[];
     touched: Touched[];
+    /** Every applied op, in order. */
+    ops: OpOutcome[];
   };
   warnings: string[];
 }
 
-class OpError extends Error {}
-const bad = (msg: string): never => {
-  throw new OpError(msg);
-};
+/**
+ * Finds the blank a box was meant for in the page render (snap.ts): given a
+ * box in fractions, the snapped box, or a reason it found none nearby.
+ */
+export type Snapper = (page: number, box: Box, mode: SnapMode) => { box: Box } | { none: string };
 
-const isRec = (x: unknown): x is Record<string, unknown> =>
-  typeof x === "object" && x !== null && !Array.isArray(x);
-const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
-const round = (n: number, d = 4) => Math.round(n * 10 ** d) / 10 ** d;
-
-interface Doc {
-  s: RenderSchema;
-  field: Map<string, Field>;
-  group: Map<string, Group>;
-  /** member field id → its group */
-  owner: Map<string, Group>;
-}
-
-function index(s: RenderSchema): Doc {
-  const field = new Map<string, Field>();
-  for (const f of s.fields as Field[]) if (f && typeof f.id === "string") field.set(f.id, f);
-  const group = new Map<string, Group>();
-  const owner = new Map<string, Group>();
-  for (const g of s.groups as Group[]) {
-    if (!g || typeof g.id !== "string") continue;
-    group.set(g.id, g);
-    if (Array.isArray(g.members)) {
-      for (const m of g.members) if (typeof m === "string") owner.set(m, g);
-    }
-  }
-  return { s, field, group, owner };
-}
-
-function members(d: Doc, g: Group): Field[] {
-  const ids = Array.isArray(g.members) ? (g.members as unknown[]) : [];
-  return ids.flatMap((m) => {
-    const f = typeof m === "string" ? d.field.get(m) : undefined;
-    return f ? [f] : [];
-  });
-}
-
-/** Percent bbox of fields. */
-function bbox(fs: readonly Field[]): { x: number; y: number; w: number; h: number } | null {
-  if (!fs.length) return null;
-  const x0 = Math.min(...fs.map((f) => f.xpct));
-  const y0 = Math.min(...fs.map((f) => f.ypct));
-  const x1 = Math.max(...fs.map((f) => f.xpct + f.wpct));
-  const y1 = Math.max(...fs.map((f) => f.ypct + f.hpct));
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-}
-
-/** Map every rect (field boxes and their comb cells) from bbox `a` to bbox `b`, in percent. */
-function transform(fs: readonly Field[], a: Box, b: Box): void {
-  const sx = a.w > 0 ? b.w / a.w : 1;
-  const sy = a.h > 0 ? b.h / a.h : 1;
-  const mx = (x: number) => b.x + (x - a.x) * sx;
-  const my = (y: number) => b.y + (y - a.y) * sy;
-  for (const f of fs) {
-    const nx = mx(f.xpct);
-    const ny = my(f.ypct);
-    f.wpct = f.wpct * sx;
-    f.hpct = f.hpct * sy;
-    f.xpct = nx;
-    f.ypct = ny;
-    if (Array.isArray(f.cells)) {
-      f.cells = f.cells.map((c) => ({ x: mx(c.x), y: my(c.y), w: c.w * sx, h: c.h * sy }));
-    }
-  }
-}
-
-function needId(d: Doc, id: unknown): { f?: Field; g?: Group } {
-  if (typeof id !== "string" || !id) bad("id is required");
-  const sid = id as string;
-  const f = d.field.get(sid);
-  if (f) return { f };
-  const g = d.group.get(sid);
-  if (g) return { g };
-  return bad(`no field or group has id ${sid}`);
-}
-
-function checkFraction(v: unknown, name: string, min = 0, max = 1): number {
-  if (!isNum(v)) bad(`${name} must be a number (a fraction of the page, 0–1)`);
-  const n = v as number;
-  if (n < min || n > max) {
-    bad(`${name} must be between ${String(min)} and ${String(max)} (a fraction of the page)`);
-  }
-  return n;
-}
-
-const ON_PAGE = "the box must lie on the page (x + w ≤ 1, y + h ≤ 1, fractions of the page)";
-
-function onPage(b: Box): boolean {
-  const eps = 1e-6;
-  return !(b.x < -eps || b.y < -eps || b.x + b.w > 1 + eps || b.y + b.h > 1 + eps);
-}
-
-function checkBoxOnPage(b: Box): void {
-  if (b.w <= 0 || b.h <= 0) bad("the box must have a positive width and height");
-  if (!onPage(b)) bad(ON_PAGE);
+export interface ApplyOptions {
+  snap?: Snapper;
 }
 
 /** Move/scale an item's boxes to `nb` (percent). Page bounds are checked on the
@@ -215,17 +219,6 @@ function checkBoxOnPage(b: Box): void {
 function placeBox(fs: readonly Field[], bb: Box, nb: Box): void {
   if (nb.w <= 0 || nb.h <= 0) bad("the box must have a positive width and height");
   transform(fs, bb, nb);
-}
-
-function pageOf(d: Doc, page: unknown): number {
-  if (!Number.isInteger(page)) bad("page must be a 1-based page number");
-  const p = page as number;
-  if (!d.s.pages.some((x) => x && x.page === p)) {
-    bad(
-      `page ${String(p)} is not part of this form (pages: ${d.s.pages.map((x) => x.page).join(", ")})`,
-    );
-  }
-  return p;
 }
 
 /** The section of the nearest field at or above a point (the web editor's sectionForPos). */
@@ -299,22 +292,6 @@ function setFieldType(f: Field, t: string): void {
   if (type !== "signature") delete f.signing_requirement;
 }
 
-/** Remove `ids` from a group's members and grid; a group left empty goes too. */
-function dropMembers(d: Doc, g: Group, ids: ReadonlySet<string>): boolean {
-  if (Array.isArray(g.members))
-    g.members = (g.members as unknown[]).filter((m) => !ids.has(m as string));
-  if (Array.isArray(g.grid)) {
-    g.grid = (g.grid as unknown[]).map((row) =>
-      Array.isArray(row) ? row.map((c) => (typeof c === "string" && ids.has(c) ? null : c)) : row,
-    );
-  }
-  if (Array.isArray(g.members) && g.members.length === 0) {
-    d.s.groups = d.s.groups.filter((x) => x !== g);
-    return true;
-  }
-  return false;
-}
-
 function entryType(d: Doc, id: string): string {
   const g = d.group.get(id);
   if (g) {
@@ -347,15 +324,60 @@ function touchedOf(d: Doc, id: string): Touched | null {
   };
 }
 
-function applyOne(
+interface OneResult {
+  touched: string[];
+  added?: string;
+  deleted?: string[];
+  geometry?: string;
+  /** tables whose structure changed: tableIssues runs on them */
+  tables?: string[];
+  /** a snap the op asked for: whether it found its blank */
+  snapped?: boolean;
+}
+
+/** Snap a single field's box (percent) to the blank under it, if the op asked. */
+function snapField(
   d: Doc,
-  op: Op,
-  warnings: string[],
-): { touched: string[]; added?: string; deleted?: string[]; geometry?: string } {
+  f: Field,
+  op: Record<string, unknown>,
+  opts: ApplyOptions,
+  w: string[],
+): boolean | undefined {
+  if (op.snap === undefined) return undefined;
+  if (!(SNAP_MODES as readonly unknown[]).includes(op.snap))
+    bad(`snap must be one of ${SNAP_MODES.join(", ")}`);
+  if (!opts.snap) bad("snap needs the page render, which isn't available for this edit");
+  const box = { x: f.xpct / 100, y: f.ypct / 100, w: f.wpct / 100, h: f.hpct / 100 };
+  const r = opts.snap!(f.page, box, op.snap as SnapMode);
+  if ("none" in r) {
+    w.push(`${f.id}: snap ${String(op.snap)} found ${r.none}; the box was kept as given`);
+    return false;
+  }
+  transform(
+    [f],
+    { x: f.xpct, y: f.ypct, w: f.wpct, h: f.hpct },
+    {
+      x: r.box.x * 100,
+      y: r.box.y * 100,
+      w: r.box.w * 100,
+      h: r.box.h * 100,
+    },
+  );
+  return true;
+}
+
+function checkSnapTarget(g: Group | undefined, op: Record<string, unknown>): void {
+  if (op.snap !== undefined && g) bad("snap applies to a single field, not a group");
+}
+
+function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneResult {
   if (!isRec(op) || typeof op.op !== "string") return bad("each op needs an `op` name");
+  const raw = op as unknown as Record<string, unknown>;
+  const table = (r: TableOpResult): OneResult => r;
   switch (op.op) {
     case "move": {
       const { f, g } = needId(d, op.id);
+      checkSnapTarget(g, raw);
       const fs = g ? members(d, g) : [f as Field];
       const bb = bbox(fs);
       if (!bb) return bad("this group has no member boxes to move");
@@ -370,7 +392,8 @@ function applyOne(
         ny = bb.y + checkFraction(op.dy ?? 0, "dy", -1, 1) * 100;
       } else return bad("move needs x/y (new top-left) or dx/dy (offset)");
       placeBox(fs, bb, { x: nx, y: ny, w: bb.w, h: bb.h });
-      return { touched: [(g ?? f)!.id], geometry: (g ?? f)!.id };
+      const snapped = f ? snapField(d, f, raw, opts, warnings) : undefined;
+      return { touched: [(g ?? f)!.id], geometry: (g ?? f)!.id, snapped };
     }
     case "resize": {
       const { f, g } = needId(d, op.id);
@@ -387,6 +410,7 @@ function applyOne(
     }
     case "set_box": {
       const { f, g } = needId(d, op.id);
+      checkSnapTarget(g, raw);
       const fs = g ? members(d, g) : [f as Field];
       const bb = bbox(fs);
       if (!bb) return bad("this group has no member boxes to place");
@@ -396,7 +420,8 @@ function applyOne(
         w: checkFraction(op.w, "w") * 100,
         h: checkFraction(op.h, "h") * 100,
       });
-      return { touched: [(g ?? f)!.id], geometry: (g ?? f)!.id };
+      const snapped = f ? snapField(d, f, raw, opts, warnings) : undefined;
+      return { touched: [(g ?? f)!.id], geometry: (g ?? f)!.id, snapped };
     }
     case "relabel": {
       const { f, g } = needId(d, op.id);
@@ -408,6 +433,11 @@ function applyOne(
       const { f, g } = needId(d, op.id);
       if (typeof op.type !== "string") return bad("type is required");
       if (g) {
+        if (g.kind === "table") {
+          return bad(
+            "a table's types live on its columns (or rows): use set_column_type {id, index, type}, or set_orientation",
+          );
+        }
         if (g.kind !== "choice") {
           return bad(
             "only a radio/multiselect group can be retyped (to radio or multiselect); ungroup other groups first",
@@ -421,6 +451,11 @@ function applyOne(
       }
       const fld = f as Field;
       const own = d.owner.get(fld.id);
+      if (own?.kind === "table") {
+        return bad(
+          `this is a cell of table ${own.id}, typed by its whole column (or row): use set_column_type {id: "${own.id}", index, type}`,
+        );
+      }
       if (own) {
         return bad(
           `this is an option/cell of group ${own.id}, whose kind fixes its type; ungroup it first to retype it`,
@@ -431,25 +466,16 @@ function applyOne(
     }
     case "add": {
       const page = pageOf(d, op.page);
-      if (!isRec(op.box))
-        return bad("box {x, y, w, h} is required (fractions of the page, top-left origin)");
-      const box: Box = {
-        x: checkFraction(op.box.x, "box.x"),
-        y: checkFraction(op.box.y, "box.y"),
-        w: checkFraction(op.box.w, "box.w"),
-        h: checkFraction(op.box.h, "box.h"),
-      };
-      checkBoxOnPage(box);
+      const box = boxArg(op.box);
       if (typeof op.label !== "string")
         return bad("label is required (the form's caption for this blank)");
       let section: string | null;
       if (op.section_id !== undefined) {
-        if (!sectionIds(d, page).has(op.section_id)) {
-          return bad(
-            `section_id ${String(op.section_id)} is not a section of page ${String(page)}`,
-          );
+        const sid = resolveId(d, op.section_id, ["section"], "section_id");
+        if (!sectionIds(d, page).has(sid)) {
+          return bad(`section_id ${sid} is not a section of page ${String(page)}`);
         }
-        section = op.section_id;
+        section = sid;
       } else section = sectionForPos(d, page, box.x * 100, box.y * 100);
       const id = randomUUID();
       const { type, format } = typeAndFormat(String(op.type));
@@ -473,41 +499,50 @@ function applyOne(
       if (op.required === true) f.required = true;
       d.s.fields.push(f);
       d.field.set(id, f);
-      return { touched: [id], added: id };
+      const snapped = snapField(d, f, raw, opts, warnings);
+      return { touched: [id], added: id, geometry: id, snapped };
     }
     case "delete": {
       const { f, g } = needId(d, op.id);
       const gone = new Set<string>();
       if (g) {
         for (const m of members(d, g)) gone.add(m.id);
-        d.s.groups = d.s.groups.filter((x) => x !== g);
-        d.group.delete(g.id);
+        removeGroup(d, g);
       } else gone.add((f as Field).id);
       // A deleted option/cell leaves its group; a group left empty goes too.
+      const reshaped: string[] = [];
       for (const og of [...d.s.groups] as Group[]) {
+        const had = Array.isArray(og.members) && (og.members as string[]).some((m) => gone.has(m));
         if (dropMembers(d, og, gone)) {
           d.group.delete(og.id);
           warnings.push(
             `deleting removed the last member of group ${og.id}, so the group was removed too`,
           );
+        } else if (had && og.kind === "table") {
+          warnings.push(
+            `the cell left an empty slot in table ${og.id}; fill it with table_add_cell or table_adopt, or drop the line with table_delete`,
+          );
+          reshaped.push(og.id);
         }
       }
-      d.s.fields = d.s.fields.filter((x) => !gone.has(x.id));
-      for (const id of gone) {
-        d.field.delete(id);
-        d.owner.delete(id);
-      }
-      return { touched: [], deleted: g ? [g.id] : [...gone] };
+      removeFields(d, gone);
+      return { touched: [], deleted: g ? [g.id] : [...gone], tables: reshaped };
     }
     case "set_format": {
       const { f, g } = needId(d, op.id);
       if (!isRec(op.format)) return bad("format must be an object");
       if (g) {
-        if (g.kind !== "comb")
-          return bad("set_format applies to a field, or to a comb group (cell_type, date_format)");
+        if (g.kind !== "comb") {
+          return bad(
+            g.kind === "table"
+              ? "a table's formats live on its cells: set_format a cell (it applies to the cell's whole column or row), or set_column_type"
+              : "set_format applies to a field, or to a comb group (cell_type, date_format)",
+          );
+        }
         for (const [k, v] of Object.entries(op.format)) {
           if (k !== "cell_type" && k !== "date_format")
             bad(`a comb group's format keys are cell_type and date_format, not ${k}`);
+          if (k === "date_format" && v !== null) checkCombDateFormat(d, g, v);
           if (v === null) delete (g as Record<string, unknown>)[k];
           else (g as Record<string, unknown>)[k] = v;
         }
@@ -521,27 +556,42 @@ function applyOne(
       if (fld.type === "signature" && !isRec(fld.format)) fld.format = {};
       const next: Record<string, unknown> = { ...(isRec(fld.format) ? fld.format : {}) };
       for (const [k, v] of Object.entries(op.format)) {
+        if (k === "date_format" && v !== null && !(DATE_FORMATS as readonly unknown[]).includes(v))
+          bad(`date_format must be one of ${DATE_FORMATS.join(", ")}`);
         if (v === null) delete next[k];
         else next[k] = v;
       }
+      // A date field stored without a format prints in DATE_FORMATS[0]; a
+      // partial format (just font_size) keeps that, since the server's date
+      // format requires date_format.
+      if (fld.type === "date" && next.date_format === undefined && Object.keys(next).length > 0)
+        next.date_format = DATE_FORMATS[0];
       const issues = formatIssues(fld.type, next, fld.id, "format");
       if (issues.length) return bad(issues.map((i) => `${i.path} ${i.reason}`).join("; "));
       if (Object.keys(next).length === 0 && (fld.type === "signature" || fld.type === "date"))
         delete fld.format;
       else fld.format = next;
+      if (own?.kind === "table") {
+        applyFormatToLine(d, own, fld, isRec(fld.format) ? fld.format : undefined, warnings);
+        return { touched: [fld.id, own.id], tables: [own.id] };
+      }
       return { touched: [fld.id] };
     }
     case "group": {
+      if (op.kind === "table") return table(groupTable(d, raw, warnings));
       if (!Array.isArray(op.ids) || op.ids.length < 1)
         return bad("ids must list the fields to group");
-      if (op.kind !== "choice" && op.kind !== "comb") return bad('kind must be "choice" or "comb"');
+      if (op.kind !== "choice" && op.kind !== "comb")
+        return bad('kind must be "choice", "comb" or "table"');
       if (typeof op.label !== "string") return bad("label is required (the question or caption)");
-      const uniq = [...new Set(op.ids)];
+      const uniq = [
+        ...new Set(op.ids.map((id) => resolveId(d, id, ["field", "group"], "ids entry"))),
+      ];
       if (op.kind === "choice" && uniq.length < 2)
         return bad("a choice group needs at least 2 options");
       const fs = uniq.map((id) => {
         const f = d.field.get(id);
-        if (!f) return bad(`${String(id)} is not a field id (group ids can't be nested)`);
+        if (!f) return bad(`${id} is not a field id (group ids can't be nested)`);
         if (d.owner.has(id))
           return bad(`${id} already belongs to group ${d.owner.get(id)!.id}; ungroup it first`);
         return f;
@@ -580,29 +630,27 @@ function applyOne(
       return { touched: [gid], added: gid };
     }
     case "ungroup": {
-      const g = d.group.get(op.id);
-      if (!g) return bad(`${String(op.id)} is not a group id`);
+      const g = needGroup(d, op.id);
       if (g.kind === "table")
         warnings.push(`ungrouped table ${g.id}: its cells are now separate fields`);
-      for (const m of members(d, g)) {
+      const ms = members(d, g);
+      for (const m of ms) {
         m.group = null;
         d.owner.delete(m.id);
       }
-      d.s.groups = d.s.groups.filter((x) => x !== g);
-      d.group.delete(g.id);
-      return { touched: members(d, g).map((m) => m.id), deleted: [g.id] };
+      removeGroup(d, g);
+      return { touched: ms.map((m) => m.id), deleted: [g.id] };
     }
     case "set_options": {
-      const g = d.group.get(op.id);
-      if (!g || g.kind !== "choice")
-        return bad("set_options applies to a radio/multiselect group id");
+      const g = needGroup(d, op.id);
+      if (g.kind !== "choice") return bad("set_options applies to a radio/multiselect group id");
       if (!Array.isArray(op.options) || op.options.length === 0)
         return bad("options must be a non-empty list");
       const opts = members(d, g);
       if (op.options.every((o) => typeof o === "string")) {
         if (op.options.length !== opts.length) {
           return bad(
-            `this group has ${String(opts.length)} options; pass that many labels (in the order the options are listed), or [{id, label}] pairs. Add an option with add (a checkbox) + group, or remove one with delete.`,
+            `this group has ${String(opts.length)} options; pass that many labels (in the order the options are listed), or [{id, label}] pairs. Add an option with add_option, or remove one with remove_option.`,
           );
         }
         // The order analyze/get_template list them (resolveMembers: reading order).
@@ -617,12 +665,57 @@ function applyOne(
           if (!isRec(o) || typeof o.id !== "string" || typeof o.label !== "string") {
             return bad("options must be all strings, or all {id, label} pairs");
           }
-          const f = opts.find((x) => x.id === o.id);
-          if (!f) return bad(`${o.id} is not an option of this group`);
+          const oid = resolveId(d, o.id, ["field"], "option id");
+          const f = opts.find((x) => x.id === oid);
+          if (!f) return bad(`${oid} is not an option of this group`);
           f.label = o.label.trim();
         }
       }
       return { touched: [g.id] };
+    }
+    case "add_option": {
+      const g = needGroup(d, op.id);
+      if (g.kind !== "choice") return bad("add_option applies to a radio/multiselect group id");
+      if (typeof op.label !== "string" || !op.label.trim())
+        return bad("label is required (the option's printed text)");
+      const box = boxArg(op.box);
+      const ms = members(d, g);
+      const n = ms.length;
+      if (op.index !== undefined && (!Number.isInteger(op.index) || op.index < 0 || op.index > n))
+        return bad(`index must be 0–${String(n)} (${String(n)} = last)`);
+      const sib = ms.find((m) => m.type === "checkbox" && isRec(m.format));
+      const f = {
+        id: randomUUID(),
+        label: op.label.trim(),
+        type: "checkbox",
+        format: sib ? structuredClone(sib.format) : { shape: "square", symbol: "✗" },
+        page: g.page,
+        section_id: ms.find((m) => typeof m.section_id === "string")?.section_id ?? null,
+        xpct: box.x * 100,
+        ypct: box.y * 100,
+        wpct: box.w * 100,
+        hpct: box.h * 100,
+        group: g.id,
+      } as Field;
+      d.s.fields.push(f);
+      d.field.set(f.id, f);
+      d.owner.set(f.id, g);
+      const list = Array.isArray(g.members) ? [...(g.members as string[])] : [];
+      list.splice(op.index ?? list.length, 0, f.id);
+      g.members = list;
+      return { touched: [g.id, f.id], added: f.id };
+    }
+    case "remove_option": {
+      const g = needGroup(d, op.id);
+      if (g.kind !== "choice") return bad("remove_option applies to a radio/multiselect group id");
+      const oid = resolveId(d, op.option, ["field"], "option");
+      if (d.owner.get(oid) !== g) return bad(`${oid} is not an option of group ${g.id}`);
+      if (members(d, g).length <= 2) {
+        return bad("a choice group needs at least 2 options; delete or ungroup the group instead");
+      }
+      dropMembers(d, g, new Set([oid]));
+      removeFields(d, new Set([oid]));
+      return { touched: [g.id], deleted: [oid] };
     }
     case "set_required": {
       const { f, g } = needId(d, op.id);
@@ -636,7 +729,7 @@ function applyOne(
     case "set_placeholder": {
       const key = op.op === "set_description" ? "description" : "placeholder";
       const { f, g } = needId(d, op.id);
-      const v = (op as Record<string, unknown>)[key];
+      const v = raw[key];
       if (v !== null && typeof v !== "string")
         return bad(`${key} must be a string (or null to clear it)`);
       const item = (g ?? f)! as Record<string, unknown> & { id: string };
@@ -644,15 +737,110 @@ function applyOne(
       else item[key] = (v as string).trim();
       return { touched: [item.id] };
     }
+    case "set_autofill": {
+      const f = needField(d, op.id);
+      const v = op.autofill;
+      if (v === null) delete f.autofill;
+      else if (typeof v === "string" && (AUTOFILL_TOKENS as readonly string[]).includes(v))
+        f.autofill = v;
+      else return bad(`autofill must be one of ${AUTOFILL_TOKENS.join(", ")}, or null to clear it`);
+      return { touched: [f.id] };
+    }
+    case "table_insert":
+      return table(tableInsert(d, raw, warnings));
+    case "table_delete":
+      return table(tableDelete(d, raw, warnings));
+    case "table_add_cell":
+      return table(tableAddCell(d, raw, warnings));
+    case "table_adopt":
+      return table(tableAdopt(d, raw, warnings));
+    case "set_column_type":
+      return table(setColumnType(d, raw, warnings));
+    case "set_orientation":
+      return table(setOrientation(d, raw, warnings));
+    case "set_header":
+      return table(setHeader(d, raw, warnings));
+    case "set_headers":
+      return table(setHeaders(d, raw, warnings));
+    case "reorder":
+      return reorder(d, raw);
     default:
+      return bad(`unknown op "${String((op as { op: unknown }).op)}"; ops: ${OP_NAMES.join(", ")}`);
+  }
+}
+
+/**
+ * reorder: the listed entries (top-level fields and groups of one page) move
+ * together, in the given order, to where the first of them sat; everything
+ * else keeps its order. Every entry of the page then carries an explicit
+ * integer `order` (the web editor's layer panel convention), which wins over
+ * the box-geometry order in the fill UI and get_template.
+ */
+function reorder(d: Doc, op: Record<string, unknown>): OneResult {
+  const page = pageOf(d, op.page);
+  if (!Array.isArray(op.ids) || op.ids.length === 0)
+    return bad("ids must list the entries to order");
+  type Block = { item: Field | Group; top: number; left: number };
+  const blocks: Block[] = [];
+  for (const f of d.s.fields as Field[]) {
+    if (f.page === page && !d.owner.has(f.id)) blocks.push({ item: f, top: f.ypct, left: f.xpct });
+  }
+  for (const g of d.s.groups as Group[]) {
+    if (g.page !== page) continue;
+    const bb = bbox(members(d, g));
+    if (bb) blocks.push({ item: g, top: bb.y, left: bb.x });
+  }
+  const orderOf = (b: Block) => (typeof b.item.order === "number" ? b.item.order : undefined);
+  const hasOrder = blocks.some((b) => orderOf(b) !== undefined);
+  blocks.sort(
+    (a, b) =>
+      (hasOrder ? (orderOf(a) ?? Infinity) - (orderOf(b) ?? Infinity) || 0 : 0) ||
+      a.top - b.top ||
+      a.left - b.left,
+  );
+  const byId = new Map(blocks.map((b) => [b.item.id, b]));
+  const want = op.ids.map((raw) => {
+    const id = resolveId(d, raw, ["field", "group"], "ids entry");
+    if (!byId.has(id)) {
       return bad(
-        `unknown op "${String((op as { op: unknown }).op)}"; ops: move, resize, set_box, relabel, retype, add, delete, set_format, group, ungroup, set_options, set_required, set_description, set_placeholder (table rows/columns can't be edited yet)`,
+        d.owner.has(id)
+          ? `${id} is an option/cell of group ${d.owner.get(id)!.id}; reorder the group`
+          : `${id} is not an entry of page ${String(page)}`,
       );
+    }
+    return id;
+  });
+  if (new Set(want).size !== want.length) return bad("ids lists an entry twice");
+  const moving = new Set(want);
+  const at = blocks.findIndex((b) => moving.has(b.item.id));
+  const rest = blocks.filter((b) => !moving.has(b.item.id));
+  const before = blocks.slice(0, at).filter((b) => !moving.has(b.item.id)).length;
+  const next = [
+    ...rest.slice(0, before),
+    ...want.map((id) => byId.get(id)!),
+    ...rest.slice(before),
+  ];
+  next.forEach((b, i) => {
+    b.item.order = i;
+  });
+  return { touched: want };
+}
+
+/** A comb's date_format: one D/M/Y letter per cell, e.g. DDMMYYYY for 8 cells. */
+function checkCombDateFormat(d: Doc, g: Group, v: unknown): void {
+  const slots = members(d, g).reduce(
+    (n, m) => n + (Array.isArray(m.cells) && m.cells.length > 1 ? m.cells.length : 1),
+    0,
+  );
+  if (typeof v !== "string" || !/^[DMY]+$/.test(v) || v.length !== slots) {
+    bad(
+      `a comb's date_format has one letter (D, M or Y) per cell: this comb has ${String(slots)} cells (e.g. ${slots === 8 ? "DDMMYYYY" : slots === 6 ? "DDMMYY" : "D".repeat(Math.min(2, slots)) + "…"})`,
+    );
   }
 }
 
 /** The validation issues of the items an op left behind (touched ids and their groups). */
-function touchedIssues(d: Doc, ids: readonly string[]): Issue[] {
+function touchedIssues(d: Doc, ids: readonly string[], tables: readonly string[] = []): Issue[] {
   const out: Issue[] = [];
   const seen = new Set<string>();
   const check = (id: string) => {
@@ -669,6 +857,10 @@ function touchedIssues(d: Doc, ids: readonly string[]): Issue[] {
     if (own && d.group.has(own.id)) check(own.id);
   };
   for (const id of ids) check(id);
+  for (const id of tables) {
+    const g = d.group.get(id);
+    if (g) out.push(...tableIssues(d, g));
+  }
   return out;
 }
 
@@ -685,12 +877,13 @@ export function applyOps(
   render: RenderSchema,
   ops: readonly unknown[],
   screen?: WordingScreen,
+  opts: ApplyOptions = {},
 ): ApplyResult {
   // Geometry ops whose item ends up off the page are excluded and the batch
   // replayed without them (each replay excludes at least one more op, so it ends).
   const excluded = new Map<number, string>();
   for (;;) {
-    const pass = applyPass(render, ops, excluded, screen);
+    const pass = applyPass(render, ops, excluded, screen, opts);
     if (!pass.offPage.size) return pass.result;
     for (const [i, reason] of pass.offPage) excluded.set(i, reason);
   }
@@ -700,7 +893,8 @@ function applyPass(
   render: RenderSchema,
   ops: readonly unknown[],
   excluded: ReadonlyMap<number, string>,
-  screen?: WordingScreen,
+  screen: WordingScreen | undefined,
+  opts: ApplyOptions,
 ): { result: ApplyResult; offPage: Map<number, string> } {
   let cur: RenderSchema = structuredClone(render);
   /** op index → the item its geometry op placed */
@@ -711,6 +905,7 @@ function applyPass(
   const deleted: string[] = [];
   const touchedIds = new Set<string>();
   const warnings: string[] = [];
+  const outcomes: OpOutcome[] = [];
   let applied = 0;
   ops.forEach((raw, i) => {
     const skip = excluded.get(i);
@@ -722,8 +917,8 @@ function applyPass(
     const d = index(draft);
     const w: string[] = [];
     try {
-      const r = applyOne(d, raw as Op, w);
-      const issues = touchedIssues(d, r.touched);
+      const r = applyOne(d, raw as Op, w, opts);
+      const issues = touchedIssues(d, r.touched, r.tables);
       if (issues.length) {
         bad(
           issues
@@ -746,9 +941,18 @@ function applyPass(
           );
         }
       }
+      const name = (raw as Op).op;
+      // An op that leaves the schema exactly as it was (set_format to the same
+      // value, a move by 0) still counts as applied, flagged so the agent knows.
+      const noop = JSON.stringify(draft) === JSON.stringify(cur);
+      outcomes.push({
+        op_index: i,
+        op: name,
+        ...(r.snapped !== undefined ? { snapped: r.snapped } : {}),
+        ...(noop ? { noop: true as const } : {}),
+      });
       cur = draft;
       applied++;
-      const name = (raw as Op).op;
       counts[name] = (counts[name] ?? 0) + 1;
       if (r.added) added.push({ op_index: i, id: r.added });
       if (r.geometry) placed.set(i, r.geometry);
@@ -790,7 +994,7 @@ function applyPass(
       render: cur,
       applied,
       rejected,
-      diff_summary: { counts, added, deleted, touched },
+      diff_summary: { counts, added, deleted, touched, ops: outcomes },
       warnings,
     },
     offPage,

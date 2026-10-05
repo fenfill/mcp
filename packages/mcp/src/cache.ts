@@ -17,6 +17,9 @@
 //                                       one finished analysis of a blank PDF
 //                                       (unsaved, or saved as that template)
 //   pending/<sha256>.<optsHash>.json    the analyze lock / in-progress job
+//   pending/t-<template id>.<optsHash>.json
+//                                       a reanalyze_template run in progress
+//                                       (its job id + the template before it)
 //   templates/<id>/blank.pdf            a template's blank PDF (1 h TTL)
 //   account/<workspace_id>/logo.bin     the workspace branding logo (1 h TTL)
 //   outputs/<sha256>                    marker: a PDF this server produced
@@ -193,6 +196,49 @@ export interface PendingRead {
   stamp: FileStamp;
 }
 
+/** A reanalyze_template run: its lock, then its job (resumed by a repeat call). */
+export interface TemplatePendingEntry extends IdentityTagged {
+  v: 1;
+  template_id: string;
+  /** Canonical page spec ("1-3,5"). */
+  pages: string;
+  /** The kind asked for (null = the server's default). */
+  kind: string | null;
+  created_at: string;
+  pid: number;
+  owner?: string;
+  token?: string;
+  job_id?: string;
+  cost?: number;
+  /** The template as it was when the run was posted (for the diff). Layout
+   *  and the form's wording only, never a value. */
+  before?: RenderSchema;
+  before_updated_at?: string | null;
+  poll_errors?: number;
+  /** The POST's outcome is unknown (or a re-send of it was refused in a way
+   *  that says a run may exist): repeats re-send `before_updated_at`. */
+  unknown_outcome?: boolean;
+  failed_at?: string;
+}
+
+export interface TemplatePendingRead {
+  optsHash: string;
+  entry: TemplatePendingEntry | null;
+  ageMs: number;
+  stamp: FileStamp;
+}
+
+/** The lock-file key of one re-analysis request (template, pages, kind, API + key). */
+export function rerunHash(
+  templateId: string,
+  pages: string,
+  kind: string | null,
+  who: ApiIdentity | null,
+): string {
+  const scope = who ? { o: who.api_origin, k: who.account.key_sha } : {};
+  return sha256Hex(JSON.stringify({ t: templateId, p: pages, kind, ...scope })).slice(0, 16);
+}
+
 /** Which pending entry a removal targets: the exact file version read, or the
  *  entry holding this lock token or job id. Anything else is left in place. */
 export type PendingMatch = { stamp: FileStamp } | { token: string } | { job_id: string };
@@ -340,7 +386,7 @@ function stampMatches(
     const s = m.stamp;
     return st.dev === s.dev && st.ino === s.ino && st.mtimeMs === s.mtimeMs && raw === s.raw;
   }
-  const e = parseJson<PendingEntry>(raw);
+  const e = parseJson<{ token?: unknown; job_id?: unknown }>(raw);
   if (!e || typeof e !== "object") return false;
   return "token" in m ? e.token === m.token : e.job_id === m.job_id;
 }
@@ -410,6 +456,17 @@ export class Cache {
     await writeFileAtomic(join(d, analysisName(entry)), JSON.stringify(entry));
   }
 
+  /** Remove one cached analysis (by its file name). true = removed. */
+  async deleteAnalysis(entry: CachedAnalysis): Promise<boolean> {
+    assertSha(entry.sha256);
+    try {
+      await fsp.rm(join(this.root, "forms", entry.sha256, analysisName(entry)));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Mark a form's analyses as used now (the sweep drops forms unused for 90 days). */
   async touchForm(sha: string): Promise<void> {
     assertSha(sha);
@@ -457,7 +514,13 @@ export class Cache {
    * its first write reads as a fresh lock without a job id.
    */
   async readPending(sha: string, optsHash: string): Promise<PendingRead | null> {
-    const p = this.pendingPath(sha, optsHash);
+    return this.readPendingAt<PendingEntry>(this.pendingPath(sha, optsHash), optsHash);
+  }
+
+  private async readPendingAt<E extends { v: 1; created_at?: string }>(
+    p: string,
+    optsHash: string,
+  ): Promise<{ optsHash: string; entry: E | null; ageMs: number; stamp: FileStamp } | null> {
     let st;
     let raw: string;
     try {
@@ -466,7 +529,7 @@ export class Cache {
     } catch {
       return null;
     }
-    const parsed = parseJson<PendingEntry>(raw);
+    const parsed = parseJson<E>(raw);
     const entry = parsed && typeof parsed === "object" && parsed.v === 1 ? parsed : null;
     const created = entry?.created_at ? Date.parse(entry.created_at) : NaN;
     const born = Number.isFinite(created) ? created : st.mtimeMs;
@@ -510,7 +573,10 @@ export class Cache {
    * one has taken the path meanwhile. true = removed.
    */
   async removePending(sha: string, optsHash: string, match: PendingMatch): Promise<boolean> {
-    const p = this.pendingPath(sha, optsHash);
+    return this.removePendingAt(this.pendingPath(sha, optsHash), match);
+  }
+
+  private async removePendingAt(p: string, match: PendingMatch): Promise<boolean> {
     const tomb = join(dirname(p), `.${randomBytes(8).toString("hex")}.tomb`);
     try {
       await fsp.rename(p, tomb);
@@ -541,6 +607,58 @@ export class Cache {
     }
     await fsp.rm(tomb, { force: true });
     return same;
+  }
+
+  // ---- template pending (reanalyze_template runs) -------------------------------------
+
+  private templatePendingPath(templateId: string, optsHash: string): string {
+    assertSafeId(templateId);
+    if (!/^[0-9a-f]{16}$/.test(optsHash)) throw new Error("bad options hash");
+    return join(this.root, "pending", `t-${templateId}.${optsHash}.json`);
+  }
+
+  /** Take a re-analysis lock with O_EXCL. false = someone else holds it. */
+  async tryCreateTemplatePending(e: TemplatePendingEntry, optsHash: string): Promise<boolean> {
+    await this.dir("pending");
+    const p = this.templatePendingPath(e.template_id, optsHash);
+    let fh: fsp.FileHandle;
+    try {
+      fh = await fsp.open(p, "wx", 0o600);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw err;
+    }
+    try {
+      await fh.writeFile(JSON.stringify(e));
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    return true;
+  }
+
+  async readTemplatePending(
+    templateId: string,
+    optsHash: string,
+  ): Promise<TemplatePendingRead | null> {
+    return this.readPendingAt<TemplatePendingEntry>(
+      this.templatePendingPath(templateId, optsHash),
+      optsHash,
+    );
+  }
+
+  async updateTemplatePending(e: TemplatePendingEntry, optsHash: string): Promise<void> {
+    await this.dir("pending");
+    await writeFileAtomic(this.templatePendingPath(e.template_id, optsHash), JSON.stringify(e));
+  }
+
+  /** Compare-and-delete, as removePending. */
+  async removeTemplatePending(
+    templateId: string,
+    optsHash: string,
+    match: PendingMatch,
+  ): Promise<boolean> {
+    return this.removePendingAt(this.templatePendingPath(templateId, optsHash), match);
   }
 
   // ---- blank template PDFs + the logo (1 h TTL) ----------------------------------------

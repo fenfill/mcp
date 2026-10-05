@@ -171,7 +171,7 @@ describe("applyOps", () => {
     expect(reasons).toMatch(/colour is not a text format key/);
     expect(reasons).toMatch(/longer than 2000/);
     expect(reasons).toMatch(/already belongs to group g-choice/);
-    expect(reasons).toMatch(/table rows\/columns can't be edited yet/);
+    expect(reasons).toMatch(/unknown op "add_row"; ops: move, .*table_insert/);
     expect(r.render).toEqual(before);
   });
 
@@ -325,7 +325,10 @@ describe("EchoGuard", () => {
     const reasons = JSON.stringify(r.rejected);
     expect(reasons).not.toMatch(/kowalski|kraj/i);
     expect(r.rejected[0].reason).toMatch(/label of f-text/);
-    expect(r.rejected[2].reason).toMatch(/format\.date_format of f-date/);
+    // A date format is one of DATE_FORMATS (a comb's: one D/M/Y letter per cell),
+    // so free text there is refused before the echo screen sees it.
+    expect(r.rejected[2].reason).toMatch(/date_format must be one of DD\/MM\/YYYY/);
+    expect(r.rejected[3].reason).toMatch(/one letter \(D, M or Y\) per cell/);
     expect(r.rejected[4].reason).toMatch(/format\.symbol/);
     expect(r.warnings.join(" ")).toMatch(/placeholder of f-text: short wording/);
     expect(field(r.render, "f-text").label).not.toMatch(/kowalski/i);
@@ -339,7 +342,7 @@ describe("EchoGuard", () => {
   it("changedWording reports id + property of new or changed text", () => {
     const next = applyOps(canon(), [
       { op: "relabel", id: "f-text", label: "Amount due" },
-      { op: "set_format", id: "f-date", format: { date_format: "YYYY" } },
+      { op: "set_format", id: "f-date", format: { date_format: "DD.MM.YYYY" } },
     ]).render;
     expect(
       changedWording(canon(), next)

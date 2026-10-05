@@ -19,6 +19,8 @@ are stamped into the PDF locally and are never sent to fenfill or anywhere else.
    on your machine. If a box is misplaced, missing or mislabeled, **`edit_template`** fixes it in a
    local working copy that filling uses at once, and **`save_template`** keeps the fix in a saved
    template.
+5. **`reanalyze_template`** re-runs fenfill on some pages of a saved template (a page that was
+   never analyzed, or one that came out badly), from the blank PDF already stored with it.
 
 ### What is sent where
 
@@ -30,6 +32,7 @@ are stamped into the PDF locally and are never sent to fenfill or anywhere else.
 | Saved templates (blank PDF, fields, your logo)     | Downloaded from fenfill to fill locally                                      |
 | Page previews (`preview_page`)                     | **No**: rendered on your machine                                             |
 | Layout corrections (`edit_template`)               | Only on `save_template`, and then only the layout and the form's own wording |
+| Re-analysis (`reanalyze_template`)                 | Only the template id, pages, kind and version: nothing is uploaded           |
 
 `analyze_form` refuses PDFs whose form fields already hold answers, and PDFs this server wrote
 itself, so a filled-in form isn't uploaded by mistake.
@@ -101,6 +104,7 @@ On native Windows, if the client can't find `npx`, use `"command": "cmd"` with
 | `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.       |
 | `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.   |
 | `save_template`         | Saves `edit_template`'s working copy to a saved template.                       |
+| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff. |
 
 `analyze_form` options: `pages` (e.g. `"1-3,5"`; long PDFs can be analyzed in chunks, and
 `fill_form` merges them), `save_as_template` (also keep it as a fenfill template), `access`
@@ -130,16 +134,59 @@ workspace, free native-field (AcroForm) ones included.
 `preview_page` takes `path` (an analyzed PDF) or `template_id`, a 1-based `page`, optional
 `values` (to see them stamped; the same shapes as `fill_form`, e.g. `table_rows` =
 `[{columnId: value}, …]`, `multiselect` = an array of option ids or labels) and `dpi` (default
-110, max 200). It returns a PNG image plus a legend: each box's tag, id, type, label and `box`.
-It renders the local working copy (`edit_template`) when there is one, otherwise the saved
+110, max 200). It returns a PNG image plus a legend: each box's tag, id, type, label and `box`;
+a text/date field's stored `format` and `font_pt` (the size its value starts at; `font_auto`
+when that follows the box height); a choice's options with their own boxes; a table's cells by
+`(row, col)`, its `orientation` and headers (also printed on the image inside, or beside, the
+first cell of each line as `R: …` / `C: …`); a `table_rows` table's columns and printed cells
+with their boxes (fill values still go by column id). `warnings` and `placement_warnings` are
+always present (`[]` = checked and clean): placement covers every box shown, so a plain preview
+is a read-only placement audit (see the checks under `edit_template`). `crop`
+(`{x, y, w, h}`, fractions) with `zoom` (default 2, max 8) renders just a region, magnified, and
+lists only what it shows; `legend: "changed"` returns only the rows that changed since your last
+preview of that page (the first time: since fenfill's version), each with only its changed
+options/cells/columns (`members_changed` counts them, so a header edit doesn't list the whole
+grid), plus `removed` ids and `moved_into` (ids that now sit inside a table or group), and
+`legend: "none"` omits the legend. It renders the local working copy (`edit_template`) when there is one, otherwise the saved
 template or analyzed version; `edited: true` / `false` in the result says which. The page is rendered on your machine by
 PDFium (WebAssembly, shipped in the package; nothing native is installed), nothing is written to
 disk, and the image goes only to the calling client.
 
-`edit_template` takes `path` or `template_id` and up to 200 `ops`: `set_box` (absolute
-`{id, x, y, w, h}` in one step), `move`, `resize`, `relabel`,
-`retype`, `add`, `delete`, `set_format`, `group`, `ungroup`, `set_options`, `set_required`,
-`set_description`, `set_placeholder` (table rows and columns can't be added or removed yet).
+`edit_template` takes `path` or `template_id` and up to 200 `ops`:
+
+- fields: `set_box` (absolute `{id, x, y, w, h}` in one step), `move`, `resize`, `relabel`,
+  `retype`, `add`, `delete`, `set_format` (`date_format` is one of `DD/MM/YYYY`, `MM/DD/YYYY`,
+  `YYYY-MM-DD`, `DD.MM.YYYY`, `DD-MM-YYYY`), `set_required`, `set_description`,
+  `set_placeholder`, `set_autofill` (a browser autofill token such as `name` or `postal-code`,
+  or `null` to clear it);
+- choices and combs: `group` (`kind: "choice" | "comb"`), `ungroup`, `set_options`, and
+  `add_option` / `remove_option`, which keep the group's id;
+- tables: `group` with `kind: "table"` (a `cells` grid of field ids, rows × columns with `null`
+  for a gap, or `ids` laid out from their boxes; `header_cols`, `header_rows`, `orientation`,
+  `format`), `table_insert` / `table_delete` (a row or column; a new line's geometry is
+  interpolated from its neighbours unless you pass it), `table_add_cell` (fill an empty slot),
+  `table_adopt` (move a loose field into an empty slot), `set_column_type`, `set_orientation`
+  and `set_header` / `set_headers` (`{id, axis, texts: [...], start?}`, several in one op). Every cell of one column (or row, for `orientation: "row"`) has one type,
+  as in the web editor; `set_format` on a table cell applies to its whole column or row;
+- order: `reorder {page, ids}` moves those top-level entries together, in that order, to where
+  the first of them sat, and stamps an explicit `order` on every entry of the page (the web
+  editor's layer-panel convention), so a later sub-pixel move no longer reshuffles questions.
+
+Any id can be shortened to an unambiguous prefix of 6+ characters (the length of the preview
+tags); an ambiguous prefix is rejected with the candidates. `add`, `move` and `set_box` take an
+optional `snap`: `"underline"` fits the box onto the printed rule under it, `"cell"` into the
+ruled box around it, `"answer"` into that cell's blank part (below a caption printed at its top,
+or after one at its left), read from the page render on your machine; when nothing fits near the
+box, the box is kept and a warning says so. Snap finds printed rules with its own simple line
+finder (one ink threshold per page, not the web editor's wand): a very faint rule on a tinted
+scan can be missed, and an underline box is one line of handwriting tall (as tall as the clear
+space above the rule, within about 11–16 pt). `diff_summary.ops` lists every applied op with
+`snapped: true/false` (when it asked for a snap) and `noop: true` when it changed nothing. After
+each edit, the boxes you touched are checked for three placement problems: a value that would
+print much larger than the page's other fields (an Auto box's text size follows its height), a
+box over printed text (text layer only, so not on scans), and a box that runs a little past the
+ruled cell it sits in (from the page render, so scans too). `set_format` merges into the stored
+format (a date field keeps its date format when you only set `font_size`).
 Coordinates are fractions of the page (0–1) with a top-left origin, the same as the legend's
 `box`. Each op is checked against the rules fenfill applies when saving and is rejected with a
 reason if it breaks them; ops apply in order, all-or-nothing each, except that a box only has to
@@ -160,7 +207,39 @@ memory). A working copy edited in an earlier session can't be checked against th
 answers: `save_template` then answers `confirm_wording_needed` with the changed ids and
 properties (never their text); review them and call again with `confirm_wording: true`. An
 unsaved analysis can be edited for filling but not saved: to keep corrections,
-analyze with `save_as_template: true` and edit that template.
+analyze with `save_as_template: true` and edit that template. With nothing to save, it succeeds
+with `saved: false, nothing_to_save: true`. `get_template` says `has_local_edits` (its fields
+are fenfill's saved version; `preview_page` shows the working copy) and gives `field_count`
+(entries listed) and `field_count_total` (the whole form); `save_template`'s `field_count` is
+the whole saved template.
+
+### Re-analyzing pages of a saved template
+
+A template saved from only some pages (`analyze_form` with `pages` and `save_as_template`) has
+pages fenfill never looked at: `get_template` lists them as `unanalyzed_pages`, and
+`list_templates` shows `analyzed_pages` next to `page_count`. `reanalyze_template` takes
+`template_id`, `pages` and a `kind`:
+
+| `kind`          | Use it to                                                                         |
+| --------------- | --------------------------------------------------------------------------------- |
+| `scratch`       | analyze a never-analyzed page, or replace a badly analyzed page's fields entirely |
+| `find`          | add blanks the first pass missed, keeping everything already there                |
+| `relabel`       | re-derive labels, types, groups and sections, keeping the boxes                   |
+| `label_missing` | fill in only the labels that are missing                                          |
+
+`kind` can be left out only when the pages have no fields (it then means `scratch`). Each page
+costs one page scan; `label_missing` is free within the workspace's monthly free-label
+allowance. `estimate: true` prices the run and starts nothing. `relabel` may reset table column
+types and orientation, so check the template with `get_template` afterwards.
+
+It uses the PDF already stored with the template, so nothing is uploaded. It refuses while the
+template has unsaved `edit_template` edits (`local_edits_pending`): save them with
+`save_template` first, or pass `discard: true` to drop them when the run finishes. The result
+lists, per changed page, the fields `added`, `removed` and `changed` (label, type, box, or a
+group's cells), then the new fields of those pages; review them with `preview_page` and correct
+them with `edit_template` + `save_template`. Like `analyze_form`, it waits out capacity
+refusals, and if it answers `"running"`, calling it again with the same arguments follows the
+same run at no extra charge.
 
 ### Value shapes
 
@@ -168,7 +247,7 @@ analyze with `save_as_template: true` and edit that template.
 | ------------------- | --------------------------------------------------------------------------- |
 | `text`, `multiline` | string, stamped exactly as given                                            |
 | `comb`              | string, one character per cell                                              |
-| `date`              | `"YYYY-MM-DD"`, printed as `YYYY-MM-DD`                                     |
+| `date`              | `"YYYY-MM-DD"`, printed in the field's `date_format` (e.g. `DD/MM/YYYY`)    |
 | `checkbox`          | `true` / `false`                                                            |
 | `radio`             | option id, option label, or the bare option text (`"No"` for `"Smoke? No"`) |
 | `multiselect`       | array of those                                                              |
@@ -192,12 +271,12 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 
 ## Configuration
 
-| Variable                       | Default                   | Notes                                                  |
-| ------------------------------ | ------------------------- | ------------------------------------------------------ |
-| `FENFILL_API_KEY`              | (none)                    | `ff_live_…` from fenfill → Settings → API keys.        |
-| `FENFILL_API_URL`              | `https://api.fenfill.com` | https only (http allowed for localhost).               |
-| `FENFILL_CACHE_DIR`            | the OS cache folder       | Holds schemas and blank forms only, never answers.     |
-| `FENFILL_ANALYZE_WAIT_SECONDS` | `50`                      | How long `analyze_form` waits before saying "running". |
+| Variable                       | Default                   | Notes                                                                        |
+| ------------------------------ | ------------------------- | ---------------------------------------------------------------------------- |
+| `FENFILL_API_KEY`              | (none)                    | `ff_live_…` from fenfill → Settings → API keys.                              |
+| `FENFILL_API_URL`              | `https://api.fenfill.com` | https only (http allowed for localhost).                                     |
+| `FENFILL_CACHE_DIR`            | the OS cache folder       | Holds schemas and blank forms only, never answers.                           |
+| `FENFILL_ANALYZE_WAIT_SECONDS` | `50`                      | How long `analyze_form` / `reanalyze_template` wait before saying "running". |
 
 `fill_form` works without an API key once a form has been analyzed.
 
@@ -238,7 +317,9 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 | `request_too_large`                   | The edited template is too large to save in one request.                                                                                                       |
 | `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent. Put the form's own wording back with `edit_template`.                                 |
 | `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.      |
-| `no_local_edits`                      | `save_template` has nothing to save for that template (edits to an unsaved analysis can't be saved; see above).                                                |
+| `local_edits_pending`                 | `reanalyze_template` won't run over unsaved edits: `save_template` them first, or pass `discard: true`.                                                        |
+| `kind_required`                       | The pages already have fields: pass `kind` (`find`, `relabel`, `label_missing`, or `scratch` to replace them).                                                 |
+| `job_in_progress`                     | A job is already running on the template; wait and retry (call `reanalyze_template` again with the same arguments if you started it).                          |
 | `upload_outcome_unknown`              | An earlier upload was interrupted. To avoid charging twice, the same file isn't re-uploaded for about 10 minutes; check `get_account` meanwhile.               |
 
 ## API

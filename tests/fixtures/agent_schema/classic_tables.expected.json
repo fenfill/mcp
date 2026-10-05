@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "template_id": null,
+  "name": null,
+  "page_count": 1,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754
+    }
+  ],
+  "fields": [
+    {
+      "id": "391f4376-9964-5238-bb76-582e8a0772f7",
+      "type": "table",
+      "label": "Children",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.2,
+        "w": 0.58,
+        "h": 0.075
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "orientation": "col",
+      "header_cols": [
+        "Name",
+        "Born",
+        "School"
+      ],
+      "header_rows": [
+        "",
+        ""
+      ],
+      "cells": [
+        {
+          "id": "ffb3a3e7-95f1-5573-8140-d59a4a2f666a",
+          "row": 0,
+          "col": 0,
+          "type": "text",
+          "label": "R1 C1"
+        },
+        {
+          "id": "b8e28281-b29d-5c01-9389-9de5b72fde4b",
+          "row": 0,
+          "col": 1,
+          "type": "date",
+          "label": "R1 C2",
+          "date_format": "DD/MM/YYYY"
+        },
+        {
+          "id": "770f2ddb-8d42-5366-8fd7-ee1f1a783cc7",
+          "row": 0,
+          "col": 2,
+          "type": "text",
+          "label": "R1 C3"
+        },
+        {
+          "id": "bdf33456-89b9-5d09-8f18-3d6263b57d35",
+          "row": 1,
+          "col": 0,
+          "type": "text",
+          "label": "R2 C1"
+        },
+        {
+          "id": "4fe464f2-2277-5d8c-9eec-bcc1faa91a9a",
+          "row": 1,
+          "col": 1,
+          "type": "date",
+          "label": "R2 C2",
+          "date_format": "DD/MM/YYYY"
+        }
+      ]
+    },
+    {
+      "id": "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb",
+      "type": "table",
+      "label": "Satisfaction",
+      "page": 1,
+      "box": {
+        "x": 0.6,
+        "y": 0.5,
+        "w": 0.12,
+        "h": 0.06
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "orientation": "col",
+      "header_cols": [
+        "1",
+        "2",
+        "3"
+      ],
+      "header_rows": [
+        "Service",
+        "Price"
+      ],
+      "cells": [
+        {
+          "id": "a264addd-47e4-5cf5-874e-6c8986cb8af3",
+          "row": 0,
+          "col": 0,
+          "type": "checkbox",
+          "label": "Q1 score 1"
+        },
+        {
+          "id": "eb6c5ef6-d396-5284-9233-d42dd119fc88",
+          "row": 0,
+          "col": 1,
+          "type": "checkbox",
+          "label": "Q1 score 2"
+        },
+        {
+          "id": "8ee445aa-bae6-5a44-a944-e8de3c170637",
+          "row": 0,
+          "col": 2,
+          "type": "checkbox",
+          "label": "Q1 score 3"
+        },
+        {
+          "id": "d23557aa-23c3-5227-a598-189faa5a5095",
+          "row": 1,
+          "col": 0,
+          "type": "checkbox",
+          "label": "Q2 score 1"
+        },
+        {
+          "id": "a11f1f01-cf9d-5fad-8269-a722cb72d6e7",
+          "row": 1,
+          "col": 1,
+          "type": "checkbox",
+          "label": "Q2 score 2"
+        },
+        {
+          "id": "33aef921-55da-5bf0-a5ee-0d65a4508db4",
+          "row": 1,
+          "col": 2,
+          "type": "checkbox",
+          "label": "Q2 score 3"
+        }
+      ]
+    },
+    {
+      "id": "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac",
+      "type": "table",
+      "label": "Legacy table",
+      "page": 1,
+      "box": {
+        "x": 0.1,
+        "y": 0.698,
+        "w": 0.552,
+        "h": 0.085
+      },
+      "section": null,
+      "required": false,
+      "description": null,
+      "placeholder": null,
+      "autofill": null,
+      "orientation": "col",
+      "header_cols": [],
+      "header_rows": [],
+      "cells": [
+        {
+          "id": "dd6d5149-a8e0-5546-8d72-a94d9b0d689e",
+          "row": 0,
+          "col": 0,
+          "type": "text",
+          "label": "Legacy 0"
+        },
+        {
+          "id": "cdd1e1aa-7857-5f20-8232-ff5d6b486bc1",
+          "row": 0,
+          "col": 1,
+          "type": "text",
+          "label": "Legacy 1"
+        },
+        {
+          "id": "c015e8ef-3e22-5239-b1b6-e45f685c85fa",
+          "row": 0,
+          "col": 2,
+          "type": "text",
+          "label": "Legacy 2"
+        },
+        {
+          "id": "042059a1-8a21-50ad-82d2-252ab4d9ef79",
+          "row": 1,
+          "col": 0,
+          "type": "text",
+          "label": "Legacy 3"
+        },
+        {
+          "id": "0a7a54eb-302b-5f04-aca0-3b72a204eb2d",
+          "row": 1,
+          "col": 2,
+          "type": "text",
+          "label": "Legacy 4"
+        }
+      ]
+    }
+  ],
+  "_parity": {
+    "391f4376-9964-5238-bb76-582e8a0772f7": {
+      "fill_keys": {
+        "ffb3a3e7-95f1-5573-8140-d59a4a2f666a": "fffb3a3e7-95f1-5573-8140-d59a4a2f666a",
+        "b8e28281-b29d-5c01-9389-9de5b72fde4b": "fb8e28281-b29d-5c01-9389-9de5b72fde4b",
+        "770f2ddb-8d42-5366-8fd7-ee1f1a783cc7": "f770f2ddb-8d42-5366-8fd7-ee1f1a783cc7",
+        "bdf33456-89b9-5d09-8f18-3d6263b57d35": "fbdf33456-89b9-5d09-8f18-3d6263b57d35",
+        "4fe464f2-2277-5d8c-9eec-bcc1faa91a9a": "f4fe464f2-2277-5d8c-9eec-bcc1faa91a9a"
+      }
+    },
+    "88dfd1e3-11c4-5bca-8c9f-dc2f8b713edb": {
+      "fill_keys": {
+        "a264addd-47e4-5cf5-874e-6c8986cb8af3": "fa264addd-47e4-5cf5-874e-6c8986cb8af3",
+        "eb6c5ef6-d396-5284-9233-d42dd119fc88": "feb6c5ef6-d396-5284-9233-d42dd119fc88",
+        "8ee445aa-bae6-5a44-a944-e8de3c170637": "f8ee445aa-bae6-5a44-a944-e8de3c170637",
+        "d23557aa-23c3-5227-a598-189faa5a5095": "fd23557aa-23c3-5227-a598-189faa5a5095",
+        "a11f1f01-cf9d-5fad-8269-a722cb72d6e7": "fa11f1f01-cf9d-5fad-8269-a722cb72d6e7",
+        "33aef921-55da-5bf0-a5ee-0d65a4508db4": "f33aef921-55da-5bf0-a5ee-0d65a4508db4"
+      }
+    },
+    "b3be75fd-0d8a-5db3-a4f7-79a9dabf5dac": {
+      "fill_keys": {
+        "dd6d5149-a8e0-5546-8d72-a94d9b0d689e": "fdd6d5149-a8e0-5546-8d72-a94d9b0d689e",
+        "cdd1e1aa-7857-5f20-8232-ff5d6b486bc1": "fcdd1e1aa-7857-5f20-8232-ff5d6b486bc1",
+        "c015e8ef-3e22-5239-b1b6-e45f685c85fa": "fc015e8ef-3e22-5239-b1b6-e45f685c85fa",
+        "042059a1-8a21-50ad-82d2-252ab4d9ef79": "f042059a1-8a21-50ad-82d2-252ab4d9ef79",
+        "0a7a54eb-302b-5f04-aca0-3b72a204eb2d": "f0a7a54eb-302b-5f04-aca0-3b72a204eb2d"
+      }
+    }
+  }
+}

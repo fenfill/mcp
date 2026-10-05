@@ -44,7 +44,10 @@ export interface CompactForm {
   name?: string;
   /** Spec of the pages this view lists, e.g. "1-3,5". */
   pages: string;
+  /** Entries listed in this view (the pages shown). */
   field_count: number;
+  /** Entries in the whole form. */
+  field_count_total: number;
   sections: SectionBlock[];
 }
 
@@ -52,6 +55,7 @@ export interface OverviewForm {
   name?: string;
   pages: string;
   field_count: number;
+  field_count_total: number;
   too_large: true;
   overview: { page: number; fields: number; required: number; sections?: string[] }[];
   next: string;
@@ -99,6 +103,7 @@ export function compactView(
     ...(agent.name ? { name: agent.name } : {}),
     pages: pagesToSpec(pages),
     field_count: entries.length,
+    field_count_total: agent.fields.length,
   };
   const full: CompactForm = { ...base, sections: nestBySection(entries) };
   if (pages.length <= 1 || JSON.stringify(full).length <= maxChars) return full;

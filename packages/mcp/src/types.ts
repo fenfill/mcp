@@ -27,12 +27,21 @@ export interface AgentEntry {
   [extra: string]: unknown;
 }
 
+export interface AgentPage {
+  page: number;
+  width: number;
+  height: number;
+  /** Saved templates only: false = this page was never analyzed (it has no
+   *  fields because nothing looked, not because it has no blanks). */
+  analyzed?: boolean;
+}
+
 export interface AgentSchema {
   schema_version: number;
   template_id: string | null;
   name: string | null;
   page_count: number;
-  pages: { page: number; width: number; height: number }[];
+  pages: AgentPage[];
   fields: AgentEntry[];
   /** A saved template's version (ISO time): the base of an optimistic save. */
   updated_at?: string;
@@ -77,6 +86,32 @@ export interface JobBody {
   render?: RenderSchema;
   /** Not sent by the job poll today (only the 202 carries it); read if present. */
   extra_blanks_available?: boolean;
+}
+
+/** One row of GET /v1/templates (only what the MCP reads; the rest passes through). */
+export interface TemplateSummary {
+  id: string;
+  page_count?: number;
+  /** The pages fenfill analyzed (legacy NULL expanded to every page). */
+  analyzed_pages?: number[];
+  [k: string]: unknown;
+}
+
+/** The re-analysis kinds of POST /v1/templates/{id}/analyze. */
+export type RerunKind = "scratch" | "find" | "relabel" | "label_missing";
+
+/** POST /v1/templates/{id}/analyze with estimate: true, 200. */
+export interface RerunEstimate {
+  kind: RerunKind;
+  pages: number[];
+  /** Scans the run would charge now. */
+  cost: number;
+  /** label_missing: how many of `pages` the free monthly bucket covers. */
+  free_label_pages: number;
+  free_label_pages_left: number;
+  scans_left: number;
+  /** The run would be refused with 402 insufficient_scans. */
+  insufficient: boolean;
 }
 
 /** PATCH /v1/templates/{id} 200. */

@@ -5,7 +5,14 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { Cache, optionsHash, type PendingEntry, sha256Hex } from "../src/cache.js";
+import {
+  Cache,
+  optionsHash,
+  type PendingEntry,
+  rerunHash,
+  sha256Hex,
+  type TemplatePendingEntry,
+} from "../src/cache.js";
 import { sweepCache } from "../src/sweep.js";
 import { connect, env, MockApi, tmp, virtualClock } from "./helpers.js";
 
@@ -65,6 +72,24 @@ describe("sweepCache", () => {
     gone.push(await pending({ pages: null }, 49, 999_999_999));
     keep.push(await pending({ pages: "1" }, 49, process.ppid)); // a live process
     keep.push(await pending({ pages: "2" }, 47, 999_999_999));
+    // reanalyze_template runs: the same rule.
+    const rerun = async (pages: string, hoursOld: number, pid: number) => {
+      const entry: TemplatePendingEntry = {
+        v: 1,
+        template_id: "tpl-1",
+        pages,
+        kind: null,
+        created_at: new Date(now - hoursOld * HOUR).toISOString(),
+        pid,
+        job_id: "j",
+      };
+      const h = rerunHash("tpl-1", pages, null, null);
+      await cache.updateTemplatePending(entry, h);
+      return join(root, "pending", `t-tpl-1.${h}.json`);
+    };
+    gone.push(await rerun("1", 49, 999_999_999));
+    keep.push(await rerun("2", 49, process.ppid));
+    keep.push(await rerun("3", 47, 999_999_999));
 
     const removed = await sweepCache(cache, now);
     for (const p of gone) expect(existsSync(p), p).toBe(false);

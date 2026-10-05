@@ -1,7 +1,7 @@
 // Bundle smoke: runs the BUILT server (dist/, copied outside the repo so no
 // node_modules can leak in) over real stdio with the SDK's StdioClientTransport,
 // and fills a plain and an owner-password-encrypted PDF fully offline from a
-// pre-seeded cache. Asserts: exactly the 11 tools; the outputs are stamped and
+// pre-seeded cache. Asserts: exactly the 12 tools; the outputs are stamped and
 // tagged; preview_page renders a PNG with the bundled pdfium.wasm, offline;
 // edit_template works offline on an unsaved analysis; stdout carried nothing
 // but JSON-RPC (also checked on a raw spawn).
@@ -48,6 +48,7 @@ const EXPECTED_TOOLS = [
   "get_template",
   "list_templates",
   "preview_page",
+  "reanalyze_template",
   "save_template",
 ];
 
@@ -348,6 +349,77 @@ try {
     arguments: { path: plainPath, values, output_path: edOut },
   });
   assert.equal(JSON.parse(edFill.content[0].text).edited, true);
+
+  // 0.2.0 table ops against the bundle: two added boxes → a table → a new row,
+  // then a cropped preview whose legend lists the table's cells by (row, col).
+  const call = async (args) => {
+    const r = await client.callTool({
+      name: "edit_template",
+      arguments: { path: plainPath, ...args },
+    });
+    assert.ok(!r.isError, r.content[0].text);
+    const body = JSON.parse(r.content[0].text);
+    assert.deepEqual(body.rejected, [], JSON.stringify(body.rejected));
+    return body;
+  };
+  const two = await call({
+    ops: [
+      {
+        op: "add",
+        page: 1,
+        type: "date",
+        box: { x: 0.1, y: 0.6, w: 0.2, h: 0.025 },
+        label: "Date",
+      },
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.35, y: 0.6, w: 0.4, h: 0.025 },
+        label: "Reason",
+      },
+    ],
+  });
+  const [d0, r0] = two.diff_summary.added.map((a) => a.id);
+  const tbl = await call({
+    ops: [
+      {
+        op: "group",
+        kind: "table",
+        label: "Visits",
+        cells: [[d0.slice(0, 8), r0]],
+        header_cols: ["Date", "Reason"],
+      },
+    ],
+  });
+  const tid = tbl.diff_summary.added[0].id;
+  await call({
+    ops: [{ op: "table_insert", id: tid, axis: "row", index: 1, box: { y: 0.63, h: 0.025 } }],
+  });
+  const crop = await client.callTool({
+    name: "preview_page",
+    arguments: {
+      path: plainPath,
+      page: 1,
+      dpi: 72,
+      crop: { x: 0, y: 0.55, w: 1, h: 0.15 },
+      zoom: 2,
+    },
+  });
+  assert.ok(!crop.isError, JSON.stringify(crop.content).slice(0, 300));
+  const cropMeta = JSON.parse(crop.content[1].text);
+  const row = cropMeta.legend.find((l) => l.id === tid);
+  assert.equal(row.type, "table");
+  assert.deepEqual(
+    row.cells.map((c) => [c.row, c.col, c.type]),
+    [
+      [0, 0, "date"],
+      [0, 1, "text"],
+      [1, 0, "date"],
+      [1, 1, "text"],
+    ],
+  );
+  process.stderr.write("smoke: table ops + cropped preview ok\n");
 
   // A refused re-analysis of our own output, offline: the tag check runs first.
   const refused = await client.callTool({

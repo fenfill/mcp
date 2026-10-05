@@ -68,6 +68,7 @@ import {
   soleTemplateId,
 } from "./merge.js";
 import { parsePageSpec } from "./pages.js";
+import { pollJobLoop } from "./poll.js";
 import type { Account, JobBody } from "./types.js";
 
 export interface JobRef {
@@ -143,10 +144,7 @@ export interface CallCtx {
 }
 
 const LOCK_WAIT_POLL_MS = 1000;
-/** Consecutive non-retryable poll failures before a pending job is dropped. */
-export const MAX_POLL_ERRORS = 3;
-/** A poll error that means the job's result will never come. */
-const TERMINAL_POLL_CODES = new Set(["result_expired", "not_found", "template_frozen"]);
+export { MAX_POLL_ERRORS } from "./poll.js";
 const NEXT_RUNNING = "call analyze_form again with the same path and options — no extra charge";
 const NEXT_RUNNING_FORCED =
   "call analyze_form again with the same path and options but WITHOUT force — that resumes this analysis at no extra charge (with force it would start, and pay for, another one)";
@@ -210,7 +208,7 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Is the process (or, in this process, the server instance) holding a lock alive? */
-export function holderAlive(e: PendingEntry): boolean {
+export function holderAlive(e: Pick<PendingEntry, "pid" | "owner">): boolean {
   return e.pid === process.pid
     ? typeof e.owner === "string" && LIVE_OWNERS.has(e.owner)
     : pidAlive(e.pid);
@@ -863,13 +861,6 @@ async function acquireJob(deps: AnalyzeDeps, a: AcquireArgs): Promise<Acquired> 
   }
 }
 
-/** A poll failure that says nothing about the job itself: retry it forever. */
-function transientPollError(e: ToolError): boolean {
-  if (e.code === "bad_response") return false; // a 2xx we can't read
-  if (e.status === undefined) return true; // network, timeout, cancelled
-  return e.status === 401 || e.status === 429 || e.status === 503 || e.code === "rate_limited";
-}
-
 async function recordPollError(deps: AnalyzeDeps, sha: string, ref: JobRef): Promise<number> {
   const p = await deps.cache.readPending(sha, ref.optsHash).catch(() => null);
   const e = p?.entry;
@@ -894,85 +885,36 @@ async function pollJob(
   ctx: CallCtx,
   forced: boolean,
 ): Promise<{ done: JobBody } | { running: Running }> {
-  const api = deps.api();
-  const clearPending = () =>
-    deps.cache.removePending(sha, ref.optsHash, { job_id: ref.job_id }).catch(() => false);
-  // Count a failure against the job; after MAX_POLL_ERRORS in a row, drop it.
-  const failed = async (err: ToolError): Promise<never> => {
-    const n = await recordPollError(deps, sha, ref);
-    if (n < MAX_POLL_ERRORS) throw err;
-    await clearPending();
-    log("warn", "analysis dropped", { job: ref.job_id, code: err.code });
-    throw new ToolError(err.code, err.message, {
-      hint: `fenfill failed on this analysis ${String(n)} times in a row, so it was dropped. Call analyze_form again to start a new one (this costs page scans again).`,
-      status: err.status,
-      details: { ...err.details, job_id: ref.job_id },
-    });
-  };
-  let cleanStreak = ref.poll_errors === 0;
-  let last = -1;
-  for (;;) {
-    let got;
-    try {
-      got = await api.getJson<JobBody>(`/jobs/${encodeURIComponent(ref.job_id)}?include=render`, {
-        signal: ctx.signal,
-        deadline,
-      });
-    } catch (e) {
-      if (e instanceof ToolError && !transientPollError(e)) {
-        // Terminal for this job id: forget it, so the next call starts afresh.
-        if (TERMINAL_POLL_CODES.has(e.code)) {
-          await clearPending();
-          throw e;
-        }
-        await failed(e);
-      }
-      throw e;
-    }
-    const body = got.body;
-    if (body.status === "done") {
-      if (body.result && body.render) return { done: body };
-      await failed(
-        new ToolError("bad_response", "fenfill returned a finished job without its schema.", {
-          hint: "Call analyze_form again with the same path; it resumes this job.",
-        }),
-      );
-    }
-    if (!cleanStreak) {
-      cleanStreak = true;
-      await resetPollErrors(deps, sha, ref);
-    }
-    if (body.status === "error") {
-      const err = body.error ?? { code: "internal_error", message: "The analysis failed." };
-      await clearPending();
-      log("warn", "analysis failed", { job: ref.job_id, code: err.code });
-      throw new ToolError(err.code, err.message, {
-        hint: jobErrorHint(err.code),
-        details: { job_id: ref.job_id },
-      });
-    }
-    const progress = typeof body.progress === "number" ? body.progress : 0;
-    if (ctx.progress && progress > last) {
-      last = progress;
-      await ctx.progress(progress, body.phase ?? body.status).catch(() => undefined);
-    }
-    const ra = Number(got.headers.get("retry-after"));
-    const waitS = Number.isFinite(ra) && ra > 0 ? ra : body.status === "queued" ? 10 : 3;
-    if (deps.now() + waitS * 1000 > deadline) {
-      const r = running(forced, ref.job_id, progress, body.phase ?? body.status);
-      if (ref.extra_blanks_available !== undefined) {
-        r.extra_blanks_available = ref.extra_blanks_available;
-      }
-      return { running: r };
-    }
-    try {
-      await deps.sleep(waitS * 1000, ctx.signal);
-    } catch {
-      throw new ToolError("cancelled", "The call was cancelled.", {
-        hint: "The analysis keeps running: call analyze_form again with the same path to resume it at no extra charge.",
-      });
-    }
+  const out = await pollJobLoop({
+    api: deps.api(),
+    now: deps.now,
+    sleep: deps.sleep,
+    jobId: ref.job_id,
+    deadline,
+    signal: ctx.signal,
+    progress: ctx.progress,
+    pollErrors: ref.poll_errors,
+    store: {
+      record: () => recordPollError(deps, sha, ref),
+      reset: () => resetPollErrors(deps, sha, ref),
+      clear: () =>
+        deps.cache.removePending(sha, ref.optsHash, { job_id: ref.job_id }).catch(() => false),
+    },
+    hints: {
+      dropped: (n) =>
+        `fenfill failed on this analysis ${String(n)} times in a row, so it was dropped. Call analyze_form again to start a new one (this costs page scans again).`,
+      badDone: "Call analyze_form again with the same path; it resumes this job.",
+      jobError: jobErrorHint,
+      cancelled:
+        "The analysis keeps running: call analyze_form again with the same path to resume it at no extra charge.",
+    },
+  });
+  if ("done" in out) return out;
+  const r = running(forced, ref.job_id, out.running.progress, out.running.phase);
+  if (ref.extra_blanks_available !== undefined) {
+    r.extra_blanks_available = ref.extra_blanks_available;
   }
+  return { running: r };
 }
 
 function jobErrorHint(code: string): string {

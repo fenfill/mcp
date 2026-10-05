@@ -300,6 +300,7 @@ describe("compactView", () => {
       required: true,
       description: "Total due in PLN",
       placeholder: "0.00",
+      variant: "currency", // a number/currency text field says so
     });
   });
 

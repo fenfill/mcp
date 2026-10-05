@@ -29,7 +29,8 @@
       "required": true,
       "description": "Total due in PLN",
       "placeholder": "0.00",
-      "autofill": null
+      "autofill": null,
+      "variant": "currency"
     },
     {
       "id": "g-table",
@@ -50,6 +51,14 @@
       "description": null,
       "placeholder": null,
       "autofill": null,
+      "orientation": "col",
+      "header_cols": [
+        "A",
+        "B"
+      ],
+      "header_rows": [
+        "R1"
+      ],
       "cells": [
         {
           "id": "f-t1",
@@ -115,7 +124,8 @@
       "required": false,
       "description": null,
       "placeholder": null,
-      "autofill": null
+      "autofill": null,
+      "date_format": "DD/MM/YYYY"
     },
     {
       "id": "f-signature",

@@ -74,7 +74,8 @@
       "required": false,
       "description": null,
       "placeholder": null,
-      "autofill": "bday"
+      "autofill": "bday",
+      "date_format": "DD.MM.YYYY"
     },
     {
       "id": "0dbd46d3-8f53-5a7c-8df1-8ad8259763c9",
@@ -94,7 +95,8 @@
       "required": false,
       "description": null,
       "placeholder": null,
-      "autofill": null
+      "autofill": null,
+      "date_format": "DD/MM/YYYY"
     },
     {
       "id": "0d7ef10e-f6c2-5efb-a122-1665336cf9ce",
@@ -128,7 +130,8 @@
       "required": false,
       "description": null,
       "placeholder": null,
-      "autofill": null
+      "autofill": null,
+      "variant": "currency"
     },
     {
       "id": "852a05e1-69ba-51ac-a85b-52ace2bb99a2",

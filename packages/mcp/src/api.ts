@@ -11,17 +11,19 @@
 // Those waits honour Retry-After, are jittered, bounded by ANALYZE_429_BUDGET_MS
 // per call and cancellable; the POST itself is never tied to a cancellation
 // signal (it has no idempotency key: a request cut mid-flight may still have
-// created, and charged, a job).
+// created, and charged, a job). The template re-analyze POST (reanalyze_template)
+// shares that wait-and-retry, with the same never-abortable POST.
 //
 // PRIVACY: nothing here ever sees fill values. Requests carry only ids, paging
-// parameters, the blank PDF (analyze), a recipient label and, from
+// parameters, the blank PDF (analyze), a re-analysis's pages/kind/version, a
+// recipient label and, from
 // save_template, a template's layout and wording (its field schema).
 
 import { setTimeout as sleepTimer } from "node:timers/promises";
 
 import type { ApiConfig } from "./config.js";
 import { ToolError } from "./errors.js";
-import type { AnalyzeAccepted } from "./types.js";
+import type { AnalyzeAccepted, RerunEstimate } from "./types.js";
 import { USER_AGENT } from "./version.js";
 
 export interface ApiDeps {
@@ -114,15 +116,20 @@ const HINTS: Record<string, string> = {
   request_too_large: "The edited template is too large to save in one request.",
   template_needs_migration:
     "This template has stored data the API can't save back as is (details says where). Ask the user to make this correction in the fenfill web editor instead.",
+  job_in_progress:
+    "A job is already running on this template (a re-analysis from this or another session, or the web app). Wait a minute or two, then check get_template (updated_at, pages[].analyzed) before retrying: a finished re-analysis may already show the new fields.",
+  kind_required:
+    'Some of these pages already have fields, so choose a kind: "find" adds blanks the first pass missed (keeps everything), "relabel" re-derives labels/types/groups keeping the boxes, "label_missing" fills in only missing labels, "scratch" replaces the pages\' fields entirely.',
 };
 
 /** What a request was about, for hints that depend on it (a 404 on a job poll
  *  is not a missing template). */
-export type ErrorContext = "job" | "template" | "other";
+export type ErrorContext = "job" | "template" | "reanalyze" | "other";
 
 /** The context of a /v1 path. */
 export function contextOf(path: string): ErrorContext {
   if (path.startsWith("/jobs/")) return "job";
+  if (/^\/templates\/[^/?]+\/analyze$/.test(path)) return "reanalyze";
   if (path.startsWith("/templates")) return "template";
   return "other";
 }
@@ -136,6 +143,22 @@ function hintFor(
   body: Record<string, unknown>,
   context: ErrorContext,
 ): string | undefined {
+  if (context === "reanalyze") {
+    if (code === "template_conflict") {
+      return "The template changed in fenfill while this call was starting (current_updated_at). Re-fetch it with get_template, then call reanalyze_template again (it reads the current version itself).";
+    }
+    if (code === "too_many_pages") {
+      return "Re-analyze fewer pages per call (the message says the limit), or pages within your plan's page window.";
+    }
+    if (code === "insufficient_scans") {
+      const need = typeof body.need === "number" ? body.need : "?";
+      const have = typeof body.have === "number" ? body.have : "?";
+      return `This re-analysis needs ${String(need)} page scans and ${String(have)} are left. Re-analyze fewer pages, or add scans in fenfill (Settings → Billing). estimate: true prices it first.`;
+    }
+  }
+  if (code === "template_frozen" && context === "job") {
+    return "The analysis was saved as a template that is frozen (the workspace is over its plan's template limit). Unfreeze it in fenfill (or upgrade), then find it with list_templates and use get_template / fill_template.";
+  }
   if (code === "insufficient_scans") {
     const need = typeof body.need === "number" ? body.need : "?";
     const have = typeof body.have === "number" ? body.have : "?";
@@ -150,12 +173,9 @@ function hintFor(
     if (context === "job") {
       return "fenfill has no record of this analysis job any more. Call analyze_form again: it starts a new analysis (this costs page scans again).";
     }
-    if (context === "template") {
+    if (context === "template" || context === "reanalyze") {
       return "Check the id. list_templates shows the workspace's template ids.";
     }
-  }
-  if (code === "template_frozen" && context === "job") {
-    return "The analysis was saved as a template that is frozen (the workspace is over its plan's template limit). Unfreeze it in fenfill (or upgrade), then find it with list_templates and use get_template / fill_template.";
   }
   return HINTS[code];
 }
@@ -395,12 +415,43 @@ export class FenfillApi {
     },
     retry: AnalyzeRetryOptions = {},
   ): Promise<AnalyzeAccepted> {
+    return this.with429Retry(() => this.analyzeOnce(pdf, filename, form), retry);
+  }
+
+  /**
+   * POST /v1/templates/{id}/analyze: re-analyze pages of a saved template from
+   * the PDF already stored with it (no upload). JSON body {pages, kind?,
+   * expected_updated_at} (or {pages, kind?, estimate: true}, which starts
+   * nothing and answers 200 RerunEstimate). Same money rules as `analyze`: the
+   * POST is never abortable, and only an enveloped 429 refused before any job
+   * exists is waited out and re-sent. A failure whose outcome is unknown throws
+   * `outcome_unknown` (fenfill refuses a duplicate run: one job per template,
+   * and expected_updated_at).
+   */
+  async analyzeTemplate(
+    templateId: string,
+    body: { pages: string; kind?: string; expected_updated_at?: string; estimate?: true },
+    retry: AnalyzeRetryOptions = {},
+  ): Promise<AnalyzeAccepted | RerunEstimate> {
+    return this.with429Retry(() => this.analyzeTemplateOnce(templateId, body), retry);
+  }
+
+  /**
+   * Send `once` until it isn't a retryable refusal: an enveloped 429 in
+   * ANALYZE_RETRY_CODES (refused before any job exists) is waited out with its
+   * Retry-After plus jitter, within ANALYZE_429_BUDGET_MS; `retry.signal`
+   * cancels a wait (never a POST in flight).
+   */
+  private async with429Retry<T>(
+    once: () => Promise<T | { refused: ToolError }>,
+    retry: AnalyzeRetryOptions,
+  ): Promise<T> {
     let waitedMs = 0; // actual, jitter included (reported)
     let spentMs = 0; // Retry-After total (the budget; jitter rides on top)
     for (;;) {
-      const r = await this.analyzeOnce(pdf, filename, form);
-      if (!("refused" in r)) return r;
-      const err = r.refused;
+      const r = await once();
+      if (!(r && typeof r === "object" && "refused" in r)) return r;
+      const err = (r as { refused: ToolError }).refused;
       const ra = err.details.retry_after;
       const retryable =
         ANALYZE_RETRY_CODES.has(err.code) &&
@@ -428,6 +479,45 @@ export class FenfillApi {
       waitedMs += sleepMs;
       spentMs += waitMs;
     }
+  }
+
+  /** One template-analyze POST: 202 / 200 (estimate), or a refusal that created no job. */
+  private async analyzeTemplateOnce(
+    templateId: string,
+    body: { pages: string; kind?: string; expected_updated_at?: string; estimate?: true },
+  ): Promise<AnalyzeAccepted | RerunEstimate | { refused: ToolError }> {
+    const path = `/templates/${encodeURIComponent(templateId)}/analyze`;
+    let res: Response;
+    try {
+      res = await this.doFetch(this.url(path), {
+        method: "POST",
+        headers: this.headers({ Accept: "application/json", "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+        redirect: "error",
+      });
+    } catch (e) {
+      const code = causeCode(e);
+      if (body.estimate || (code && NOT_SENT_CODES.has(code))) throw networkError(e, this.origin);
+      throw templateOutcomeUnknown();
+    }
+    if (res.status === 202 || (res.status === 200 && body.estimate)) {
+      try {
+        return (await res.json()) as AnalyzeAccepted | RerunEstimate;
+      } catch {
+        if (body.estimate) {
+          throw new ToolError("bad_response", "fenfill sent an unreadable response.", {
+            hint: "Retry shortly.",
+          });
+        }
+        throw templateOutcomeUnknown();
+      }
+    }
+    const err = await errorFromResponse(res, "reanalyze");
+    if (!body.estimate && err.details.enveloped === false && res.status >= 500) {
+      throw templateOutcomeUnknown();
+    }
+    if (res.status === 429) return { refused: err };
+    throw err;
   }
 
   /** One analyze POST: the 202 body, or a refusal that created no job. */
@@ -492,6 +582,17 @@ function afterWaiting(err: ToolError, waitedMs: number): ToolError {
     status: err.status,
     details: { ...err.details, waited_s: s },
   });
+}
+
+/** A re-analysis POST cut off mid-flight: a run may have started. */
+export function templateOutcomeUnknown(): ToolError {
+  return new ToolError(
+    "outcome_unknown",
+    "The request to fenfill was interrupted and it's unknown whether the re-analysis started.",
+    {
+      hint: "A run may have started. Wait a minute or two, then check get_template (updated_at, pages[].analyzed): the pages may already be re-analyzed. Calling reanalyze_template again with the same arguments is safe: it re-sends the version this request started from, so fenfill refuses a second run (job_in_progress while one runs, template_conflict once it finished) instead of charging again.",
+    },
+  );
 }
 
 export function unknownOutcome(): ToolError {

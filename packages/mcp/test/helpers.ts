@@ -266,6 +266,131 @@ export class MockApi {
   }
 }
 
+/**
+ * A saved template's render + agent with only `keep` pages analyzed: the other
+ * pages lose their fields and carry analyzed: false (as GET /v1/templates/{id}
+ * reports a never-analyzed page).
+ */
+export function onlyPages(render: RenderSchema, agent: AgentSchema, keep: number[]) {
+  const k = new Set(keep);
+  const r: RenderSchema = JSON.parse(JSON.stringify(render));
+  r.fields = r.fields.filter((f) => k.has(f.page));
+  const ids = new Set(r.fields.map((f) => f.id));
+  r.groups = r.groups.filter(
+    (g) => !Array.isArray(g.members) || (g.members as string[]).every((m) => ids.has(m)),
+  );
+  const a: AgentSchema = JSON.parse(JSON.stringify(agent));
+  a.fields = a.fields.filter((e) => k.has(e.page));
+  a.pages = a.pages.map((p) => ({ ...p, analyzed: k.has(p.page) }));
+  return { render: r, agent: a };
+}
+
+export interface RerunFlow {
+  /** Bodies of every POST /templates/{id}/analyze, parsed. */
+  posts: Record<string, unknown>[];
+  /** The job finished (the template is now `after`). */
+  done: () => boolean;
+}
+
+/**
+ * Mock a saved template that reanalyze_template re-runs: GET (+render) serves
+ * `before` at version `v1` until the job is done, then `after` at `v2`;
+ * POST /templates/{id}/analyze answers 202 (or 200 for an estimate, or
+ * `refuse(body, n)` when that returns a Response); the job walks `states`.
+ */
+export function rerunFlow(
+  mock: MockApi,
+  opts: {
+    templateId: string;
+    jobId: string;
+    before: { render: RenderSchema; agent: AgentSchema };
+    after: { render: RenderSchema; agent: AgentSchema };
+    v1: string;
+    v2: string;
+    pages: number[];
+    cost?: number;
+    states?: ("queued" | "running")[];
+    refuse?: (body: Record<string, unknown>, n: number) => Response | null;
+    estimate?: Record<string, unknown>;
+  },
+): RerunFlow {
+  const states = [...(opts.states ?? [])];
+  const posts: Record<string, unknown>[] = [];
+  let finished = false;
+  const tpl = opts.templateId;
+  const cur = () => (finished ? opts.after : opts.before);
+  const ver = () => (finished ? opts.v2 : opts.v1);
+  const cost = opts.cost ?? opts.pages.length;
+  mock
+    .on("GET", new RegExp(`^/v1/templates/${tpl}\\?include=render$`), () =>
+      json(200, { ...cur().agent, template_id: tpl, updated_at: ver(), render: cur().render }),
+    )
+    .on("GET", new RegExp(`^/v1/templates/${tpl}$`), () =>
+      json(200, { ...cur().agent, template_id: tpl, updated_at: ver() }),
+    )
+    .on("POST", new RegExp(`^/v1/templates/${tpl}/analyze$`), (req) => {
+      const body = JSON.parse(req.body) as Record<string, unknown>;
+      posts.push(body);
+      const refused = opts.refuse?.(body, posts.length);
+      if (refused) return refused;
+      if (body.estimate === true) {
+        return json(
+          200,
+          opts.estimate ?? {
+            kind: body.kind ?? "scratch",
+            pages: opts.pages,
+            cost,
+            free_label_pages: 0,
+            free_label_pages_left: 50,
+            scans_left: 10,
+            insufficient: false,
+          },
+        );
+      }
+      return json(
+        202,
+        { job_id: opts.jobId, status: "queued", mode: "ai", pages: opts.pages, cost },
+        { location: `/v1/jobs/${opts.jobId}` },
+      );
+    })
+    .on("GET", new RegExp(`^/v1/jobs/${opts.jobId}\\?include=render$`), () => {
+      const st = states.shift();
+      const base = {
+        job_id: opts.jobId,
+        mode: "ai",
+        pages: opts.pages,
+        cost,
+        created_at: "2026-10-05T00:00:00Z",
+        error: null,
+      };
+      if (st) {
+        return json(
+          200,
+          {
+            ...base,
+            status: st,
+            phase: null,
+            progress: st === "queued" ? 0 : 40,
+            template_id: tpl,
+            result: null,
+          },
+          { "retry-after": st === "queued" ? "10" : "3" },
+        );
+      }
+      finished = true;
+      return json(200, {
+        ...base,
+        status: "done",
+        phase: "done",
+        progress: 100,
+        template_id: tpl,
+        result: { ...opts.after.agent, template_id: tpl, updated_at: opts.v2 },
+        render: opts.after.render,
+      });
+    });
+  return { posts, done: () => finished };
+}
+
 // ---- virtual time ----------------------------------------------------------------------------
 
 /** A clock whose sleeps advance virtual time and yield one real tick. */

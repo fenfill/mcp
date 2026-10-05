@@ -1081,15 +1081,45 @@ export function shortIds(ids: readonly string[], min = 6): Map<string, string> {
 type CheckStatus = "filled" | "warned" | "skipped" | "empty";
 
 /**
+ * Every id the check copy outlines, in one list for shortIds: entries, radio /
+ * multiselect options, and table cells (columns of an expandable table). The
+ * check copy's tags and preview_page's legend both take their prefixes from
+ * this list, so a tag always means the same id in both.
+ */
+export function checkTagIds(entries: readonly AgentEntry[]): string[] {
+  const ids: string[] = [];
+  for (const e of entries) {
+    ids.push(e.id);
+    if (e.kind === "choice") for (const o of e.options) ids.push(o.id);
+    if (e.kind === "table") for (const c of e.cells) ids.push(c.id);
+    if (e.kind === "table_rows") for (const c of e.columns) ids.push(c.id);
+  }
+  return ids;
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const hits = (a: Rect, b: Rect) =>
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/**
  * The check copy of a filled PDF: every agent entry's box outlined in its
- * status colour and tagged with a short id prefix (radio options too), plus a
- * legend on page 1. Built from the stamped bytes, so it shows exactly what
- * the output holds. Local only, like the output itself.
+ * status colour and tagged with a short id prefix (radio options too; table
+ * cells get a thin untagged outline, their tags are in preview_page's legend),
+ * plus a legend line on page 1 unless `banner` is false. Built from the
+ * stamped bytes, so it shows exactly what the output holds. Local only, like
+ * the output itself.
  */
 async function buildCheckPdf(
   stamped: Uint8Array,
   entries: readonly AgentEntry[],
   status: (id: string) => CheckStatus,
+  banner = true,
 ): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
   const doc = await PDFDocument.load(stamped, { updateMetadata: false });
@@ -1101,30 +1131,108 @@ async function buildCheckPdf(
     skipped: rgb(0.85, 0.1, 0.1),
     empty: rgb(0.55, 0.55, 0.6),
   };
-  const boxes: { id: string; page: number; box: BoxPct; st: CheckStatus; thin: boolean }[] = [];
+  type Outline = {
+    id: string;
+    page: number;
+    box: BoxPct;
+    st: CheckStatus;
+    thin: boolean;
+    tagged: boolean;
+  };
+  const boxes: Outline[] = [];
   for (const e of entries) {
     const st = status(e.id);
     if (e.kind === "field") {
-      boxes.push({ id: e.id, page: e.field.page, box: e.field, st, thin: false });
+      boxes.push({ id: e.id, page: e.field.page, box: e.field, st, thin: false, tagged: true });
       continue;
     }
     const bb = bboxOf(e.members);
-    if (bb) boxes.push({ id: e.id, page: e.group.page, box: bb, st, thin: false });
+    if (bb) boxes.push({ id: e.id, page: e.group.page, box: bb, st, thin: false, tagged: true });
     if (e.kind === "choice") {
-      for (const o of e.options) boxes.push({ id: o.id, page: o.page, box: o, st, thin: true });
+      for (const o of e.options)
+        boxes.push({ id: o.id, page: o.page, box: o, st, thin: true, tagged: true });
+    }
+    if (e.kind === "table") {
+      for (const c of e.cells)
+        boxes.push({ id: c.id, page: c.field.page, box: c.field, st, thin: true, tagged: false });
     }
   }
-  const short = shortIds(boxes.map((b) => b.id));
+  const short = shortIds(checkTagIds(entries));
   const SIZE = 5;
+  // Page-point rects of every outline per page: a tag must not cover a box
+  // (or another tag) when it has anywhere else to go.
+  const rectOf = (b: Outline, pw: number, ph: number): Rect => {
+    const w = (b.box.wpct / 100) * pw;
+    const h = (b.box.hpct / 100) * ph;
+    return { x: (b.box.xpct / 100) * pw, y: ph - (b.box.ypct / 100) * ph - h, w, h };
+  };
+  const placedTags = new Map<number, Rect[]>();
+  // A table's headers, printed small inside the first cell of each line
+  // (R: row header, C: column header) so the agent can compare them with the
+  // form's printed headers beside them. Cells carry no tags, so it's free.
+  const HEAD = 4;
+  const heads: {
+    page: (typeof pages)[number];
+    text: string;
+    opts: Parameters<(typeof pages)[number]["drawText"]>[1];
+  }[] = [];
+  const headColor = rgb(0.15, 0.35, 0.75);
+  for (const e of entries) {
+    if (e.kind !== "table") continue;
+    const g = e.group as { header_rows?: unknown; header_cols?: unknown };
+    const texts = (v: unknown): unknown[] => (Array.isArray(v) ? (v as unknown[]) : []);
+    const firstOf = (key: "row" | "col", k: number): AgentCell | undefined =>
+      e.cells
+        .filter((c) => c[key] === k)
+        .sort((a, b) => (key === "row" ? a.col - b.col : a.row - b.row))
+        .at(0);
+    const draw = (prefix: string, raw: unknown, cell: AgentCell | undefined, below: number) => {
+      if (typeof raw !== "string" || !raw.trim() || !cell) return;
+      const page = pages[cell.field.page - 1] as (typeof pages)[number] | undefined;
+      if (!page) return;
+      const { width: pw, height: ph } = page.getSize();
+      const cx = (cell.field.xpct / 100) * pw;
+      const top = ph - (cell.field.ypct / 100) * ph;
+      const w = (cell.field.wpct / 100) * pw;
+      const h = (cell.field.hpct / 100) * ph;
+      // Inside the cell when it has room; a narrow cell (a checkbox grid) gets
+      // the row header just left of it and the column header just above it.
+      const inside = w >= 40 && h >= HEAD + 1;
+      const room = inside ? w - 1 : prefix === "R" ? Math.min(120, cx - 1) : Math.max(2 * w, 30);
+      let text = `${prefix}: ${raw.trim()}`;
+      while (text.length > 4 && helv.widthOfTextAtSize(text, HEAD) > room) {
+        text = `${text.slice(0, -2)}…`;
+      }
+      const tw = helv.widthOfTextAtSize(text, HEAD);
+      const x = inside ? cx + 0.6 : prefix === "R" ? cx - tw - 0.8 : cx;
+      const y = inside
+        ? top - HEAD - 0.4 - below
+        : prefix === "R"
+          ? top - h / 2 - HEAD / 2
+          : top + 0.6; // outside: the row header sits left, so no clash to dodge
+      heads.push({ page, text, opts: { x, y, size: HEAD, font: helv, color: headColor } });
+      // Reserve the spot: the id tags placed next steer clear of it.
+      const taken = placedTags.get(cell.field.page) ?? [];
+      taken.push({ x, y, w: tw, h: HEAD + 0.6 });
+      placedTags.set(cell.field.page, taken);
+    };
+    texts(g.header_rows).forEach((t, r) => {
+      draw("R", t, firstOf("row", r), 0);
+    });
+    // A column header shares the top-left cell with row 0's: put it one line lower there.
+    texts(g.header_cols).forEach((t, c) => {
+      const cell = firstOf("col", c);
+      const shared = cell !== undefined && cell.col === firstOf("row", cell.row)?.col;
+      const rowHead = cell ? texts(g.header_rows)[cell.row] : undefined;
+      draw("C", t, cell, shared && typeof rowHead === "string" && rowHead.trim() ? HEAD + 0.6 : 0);
+    });
+  }
   for (const b of boxes) {
     const page = pages[b.page - 1] as (typeof pages)[number] | undefined;
     if (!page) continue;
     const { width: pw, height: ph } = page.getSize();
     // Percent, TOP-LEFT origin → PDF points, BOTTOM-LEFT origin (pdf-lib).
-    const x = (b.box.xpct / 100) * pw;
-    const w = (b.box.wpct / 100) * pw;
-    const h = (b.box.hpct / 100) * ph;
-    const y = ph - (b.box.ypct / 100) * ph - h;
+    const { x, y, w, h } = rectOf(b, pw, ph);
     const color = COLORS[b.st];
     page.drawRectangle({
       x,
@@ -1137,27 +1245,56 @@ async function buildCheckPdf(
       opacity: 0,
       borderOpacity: 0.9,
     });
+    if (!b.tagged) continue;
     const tag = short.get(b.id) ?? b.id;
-    const tw = helv.widthOfTextAtSize(tag, SIZE);
-    // The tag sits just above the box: at its top-right corner when the box is
-    // wide (a printed caption usually starts at the left), else top-left; inside
-    // its top when the box touches the top of the page. An option's tag goes
-    // under its box, clear of its group's tag above the same corner.
-    const above = y + h + 1 + SIZE <= ph ? y + h + 1 : y + h - SIZE - 0.5;
-    const ty = b.thin && y - SIZE - 1.5 >= 0 ? y - SIZE - 1 : above;
-    const tx = w > 3 * (tw + 1.6) ? x + w - tw - 1.6 : x;
+    const tw = helv.widthOfTextAtSize(tag, SIZE) + 1.6;
+    const th = SIZE + 1.2;
+    // Candidate spots, preferred first: just above the box (top-right when the
+    // box is wide, since a printed caption usually starts at the left, else
+    // top-left); an option's tag first goes under its box, clear of its group's
+    // tag. Then below, beside, and finally inside the box's top. The first spot
+    // that is on the page and clear of every other outline and tag wins.
+    const right = x + w - tw;
+    const wide = w > 3 * tw;
+    const above = { x: wide ? right : x, y: y + h + 0.2 };
+    const aboveOther = { x: wide ? x : right, y: y + h + 0.2 };
+    const below = { x, y: y - th - 0.2 };
+    const belowRight = { x: right, y: y - th - 0.2 };
+    const side = { x: x + w + 0.8, y: y + h - th };
+    const left = { x: x - tw - 0.8, y: y + h - th };
+    const inside = { x, y: y + h - th - 0.2 };
+    const candidates = b.thin
+      ? [below, belowRight, above, aboveOther, side, left]
+      : [above, aboveOther, below, belowRight, side, left];
+    const others = boxes.filter((o) => o !== b && o.page === b.page).map((o) => rectOf(o, pw, ph));
+    const taken = placedTags.get(b.page) ?? [];
+    const fits = (c: { x: number; y: number }) => {
+      const r = { x: c.x, y: c.y, w: tw, h: th };
+      return (
+        r.x >= 0 &&
+        r.y >= 0 &&
+        r.x + r.w <= pw &&
+        r.y + r.h <= ph &&
+        !others.some((o) => hits(r, o)) &&
+        !taken.some((o) => hits(r, o))
+      );
+    };
+    const spot = candidates.find(fits) ?? (y + h + 0.2 + th <= ph && !b.thin ? above : inside);
+    taken.push({ x: spot.x, y: spot.y, w: tw, h: th });
+    placedTags.set(b.page, taken);
     page.drawRectangle({
-      x: tx,
-      y: ty - 0.8,
-      width: tw + 1.6,
-      height: SIZE + 1.2,
+      x: spot.x,
+      y: spot.y,
+      width: tw,
+      height: th,
       color: rgb(1, 1, 1),
       opacity: 0.85,
     });
-    page.drawText(tag, { x: tx + 0.8, y: ty, size: SIZE, font: helv, color });
+    page.drawText(tag, { x: spot.x + 0.8, y: spot.y + 0.8, size: SIZE, font: helv, color });
   }
+  for (const h of heads) h.page.drawText(h.text, h.opts);
   const first = pages[0] as (typeof pages)[number] | undefined;
-  if (first) {
+  if (first && banner) {
     const legend =
       "fenfill check copy: green = filled, orange = filled with a warning, red = skipped, grey = left empty. Tags are field-id prefixes.";
     const { height: ph } = first.getSize();
@@ -1178,6 +1315,8 @@ export interface FillAgentPdfArgs {
   infoTags?: Record<string, string>;
   /** Also build the check copy (`checkPdf`): boxes outlined and tagged. */
   check?: boolean;
+  /** The check copy's legend line on page 1 (default true; preview_page passes false). */
+  checkBanner?: boolean;
 }
 
 export interface FillAgentPdfResult {
@@ -1226,14 +1365,18 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
     const warned = new Set(
       placed.flatMap((w) => w.slice(0, w.indexOf(":")).split(" and ").map(topId)),
     );
-    res.checkPdf = await buildCheckPdf(pdf, m.entries, (id) =>
-      skippedIds.has(id)
-        ? "skipped"
-        : warned.has(id)
-          ? "warned"
-          : m.filledIds.has(id)
-            ? "filled"
-            : "empty",
+    res.checkPdf = await buildCheckPdf(
+      pdf,
+      m.entries,
+      (id) =>
+        skippedIds.has(id)
+          ? "skipped"
+          : warned.has(id)
+            ? "warned"
+            : m.filledIds.has(id)
+              ? "filled"
+              : "empty",
+      a.checkBanner !== false,
     );
   }
   return res;

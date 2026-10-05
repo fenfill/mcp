@@ -14,6 +14,7 @@ import { TOOL_NAMES } from "../src/server.js";
 import { connect, env, fixture, json, MockApi, pdfFor, pngBytes, tmp } from "./helpers.js";
 
 const JOB = "11111111-2222-4333-8444-555555555555";
+const RJOB = "99999999-2222-4333-8444-555555555555";
 const TPL = "3f1b953e-0fe9-5154-84f2-285d8aff38f5";
 
 const SENTINELS = [
@@ -123,6 +124,28 @@ describe("sentinel recorder over every tool", () => {
       )
       .on("GET", new RegExp(`^/v1/templates/${TPL}/recipients$`), () =>
         json(200, { recipients: [] }),
+      )
+      .on("POST", new RegExp(`^/v1/templates/${TPL}/analyze$`), (req) => {
+        // Only pages, kind and the version: never a value, never a file.
+        const body = JSON.parse(req.body) as Record<string, unknown>;
+        expect(Object.keys(body).sort()).toEqual(["expected_updated_at", "kind", "pages"]);
+        return json(202, { job_id: RJOB, status: "queued", mode: "ai", pages: [2], cost: 1 });
+      })
+      .on("GET", new RegExp(`^/v1/jobs/${RJOB}\\?include=render$`), () =>
+        json(200, {
+          job_id: RJOB,
+          status: "done",
+          mode: "ai",
+          phase: "done",
+          progress: 100,
+          pages: [2],
+          cost: 1,
+          created_at: "2026-10-05T00:00:00Z",
+          template_id: TPL,
+          error: null,
+          result: { ...agent, template_id: TPL, updated_at: "2026-10-04T12:00:30Z" },
+          render,
+        }),
       );
 
     const c = await connect({ env: env(cacheDir), fetchImpl: mock.fetch });
@@ -141,7 +164,12 @@ describe("sentinel recorder over every tool", () => {
     results.get_account = await c.call("get_account", {});
     results.list_templates = await c.call("list_templates", { limit: 5 });
     results.analyze_form = await c.call("analyze_form", { path: pdfPath });
-    // The zero-retention session: analyze → edit → fill → preview → save.
+    // The zero-retention session: analyze → reanalyze → edit → fill → preview → save.
+    results.reanalyze_template = await c.call("reanalyze_template", {
+      template_id: TPL,
+      pages: "2",
+      kind: "find",
+    });
     const edit1 = await c.call("edit_template", {
       path: pdfPath,
       ops: [{ op: "move", id: byLabel("City"), dx: 0.01 }],
@@ -179,13 +207,59 @@ describe("sentinel recorder over every tool", () => {
           box: { x: 0.1, y: 0.9, w: 0.3, h: 0.03 },
           label: "Phone",
         },
+        // The 0.2.0 ops: a table built from loose fields and grown by a row, a
+        // choice group, an autofill token — layout and wording only.
+        {
+          op: "group",
+          kind: "table",
+          label: "Identity",
+          cells: [
+            [byLabel("Full name"), byLabel("Email")],
+            [byLabel("Date of birth"), byLabel("Issue date")],
+          ],
+          header_cols: ["Name", "Contact"],
+        },
+        {
+          op: "group",
+          kind: "choice",
+          label: "Consent",
+          ids: [byLabel("I agree to the terms"), byLabel("Witness signature")],
+        },
+        { op: "set_autofill", id: byLabel("Postal code").slice(0, 8), autofill: "postal-code" },
       ],
     });
+    expect(results.edit_template.data.rejected).toEqual([]);
+    const added = (
+      results.edit_template.data.diff_summary as { added: { op_index: number; id: string }[] }
+    ).added;
+    const tableId = added.find((a) => a.op_index === 2)!.id;
+    const choiceId = added.find((a) => a.op_index === 3)!.id;
+    const more = await c.call("edit_template", {
+      template_id: TPL,
+      ops: [
+        { op: "table_insert", id: tableId, axis: "row", index: 2 },
+        { op: "set_column_type", id: tableId, index: 1, type: "text" },
+        {
+          op: "add_option",
+          id: choiceId,
+          label: "Maybe",
+          box: { x: 0.3, y: 0.8, w: 0.02, h: 0.02 },
+        },
+      ],
+    });
+    expect(more.data.rejected).toEqual([]);
     await c.client.callTool({
       name: "preview_page",
       arguments: { template_id: TPL, page: 1, values },
     });
     results.save_template = await c.call("save_template", { template_id: TPL });
+    // Re-analyzing after answers were filled this session still sends none of them.
+    const again = await c.call("reanalyze_template", {
+      template_id: TPL,
+      pages: "2",
+      kind: "relabel",
+    });
+    expect(again.isError).toBe(false);
     results.create_recipient_link = await c.call("create_recipient_link", {
       template_id: TPL,
       label: "Client",
@@ -200,6 +274,7 @@ describe("sentinel recorder over every tool", () => {
     expect(results.fill_template.data.filled).toBeGreaterThanOrEqual(4);
     expect(results.save_template.data.saved).toBe(true);
     expect(mock.count("PATCH", /./)).toBe(1);
+    expect(mock.count("POST", new RegExp(`^/v1/templates/${TPL}/analyze$`))).toBe(2);
 
     // The sentinels really were stamped (so the checks below are not vacuous)…
     const stamped = await extractStampedText(new Uint8Array(readFileSync(out1)), 0);

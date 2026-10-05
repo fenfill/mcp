@@ -4,6 +4,7 @@
 //   templates/*/blank.pdf, account/*/logo.bin   past their 1 h TTL
 //   forms/<sha>/*.json                          not served or written for 90 days
 //   pending/*.json                              older than 48 h, holder not alive
+//                                               (analyze locks and reanalyze runs)
 //                                               (a live lock is never touched)
 //   outputs/<sha>                               older than 365 days (the PDF's own
 //                                               Info tag is the primary guard)
@@ -98,6 +99,14 @@ export async function sweepCache(cache: Cache, now: number): Promise<number> {
   await each(await names(pendDir), async (n) => {
     if (n.startsWith(".")) {
       count(await dropIfOld(join(pendDir, n), now, LEFTOVER_MS));
+      return;
+    }
+    const t = /^t-([A-Za-z0-9_-]{1,64})\.([0-9a-f]{16})\.json$/.exec(n);
+    if (t) {
+      const p = await cache.readTemplatePending(t[1], t[2]);
+      if (!p || p.ageMs <= PENDING_SWEEP_MS) return;
+      if (p.entry && holderAlive(p.entry)) return;
+      count(await cache.removeTemplatePending(t[1], t[2], { stamp: p.stamp }));
       return;
     }
     const m = /^([0-9a-f]{64})\.([0-9a-f]{16})\.json$/.exec(n);

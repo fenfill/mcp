@@ -11,10 +11,12 @@
 //
 // Parity with the old inline builder is locked by fillMarks.test.ts.
 
+import { formatISOAs } from "@/lib/dateFormat";
 import {
   checkboxFontSizeOf,
   checkboxFormatOf,
   dateFormatFullOf,
+  dateFormatOf,
   type Field,
   fieldAnchorOf,
   fieldFontSizeOf,
@@ -173,6 +175,9 @@ export function buildMarks({
       // shrinks to width; multiline Auto vertically auto-shrinks. A pinned size sets
       // autoFit:false and renders at exactly that size.
       const ml = textMultilineOf(f);
+      // A date value is stored ISO; it prints in the field's date_format (a
+      // non-ISO legacy/free-typed value passes through unchanged).
+      if (f.type === "date") text = formatISOAs(text, dateFormatOf(f));
       push(f.page, {
         key,
         box: boxPct(f),
@@ -229,11 +234,14 @@ export function buildMarks({
           const raw = values[key] ?? "";
           if (raw === "") continue;
           const ml = m.type === "text" && textMultilineOf(m);
+          // A date cell is stored ISO and prints in its column's date_format,
+          // like a standalone date field (stampValue).
+          const v = m.type === "date" ? formatISOAs(raw, dateFormatOf(m)) : raw;
           // A ticked checkbox stores the "X" sentinel; stamp its configured mark.
           const text =
             m.type === "checkbox"
               ? checkboxFormatOf(m).symbol
-              : flattenSingleLine(textUppercaseOf(m) ? raw.toUpperCase() : raw, ml);
+              : flattenSingleLine(textUppercaseOf(m) ? v.toUpperCase() : v, ml);
           // Prefer the real detected cell for this row so marks stay glued to the
           // pre-drawn rows; only synthesize a box (clone the first row down the
           // pitch) for rows added past the detected grid or legacy no-grid tables.
