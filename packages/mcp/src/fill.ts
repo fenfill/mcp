@@ -11,7 +11,12 @@ import { randomBytes } from "node:crypto";
 import { promises as fsp, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
-import { type AgentSkip, fillAgentPdf, MCP_OUTPUT_TAG } from "@/app/t/[template_id]/fillCore";
+import {
+  type AgentSkip,
+  fillAgentPdf,
+  type FillAgentPdfResult,
+  MCP_OUTPUT_TAG,
+} from "@/app/t/[template_id]/fillCore";
 
 import { type Cache, sha256Hex } from "./cache.js";
 import { expandHome } from "./config.js";
@@ -252,6 +257,13 @@ export function fillForbiddenError(): ToolError {
   });
 }
 
+/** Why no check copy came back (fillAgentPdf's checkError), as one sentence. */
+export function checkCopyFailed(err: FillAgentPdfResult["checkError"]): string {
+  const what = "The check copy could not be built";
+  if (!err) return `${what}.`;
+  return `${what} (${[err.stage, err.id].filter(Boolean).join(", ")}): ${err.message}`;
+}
+
 export interface StampArgs {
   pdfBytes: Uint8Array;
   render: RenderSchema;
@@ -269,7 +281,8 @@ export interface StampArgs {
 
 export interface StampResult {
   output_path: string;
-  /** The check copy (check_pdf): every field box outlined and tagged. */
+  /** The check copy (check_pdf): every field box outlined and tagged. Absent
+   *  when it could not be built; a warning then says why. */
   check_path?: string;
   filled: number;
   skipped: AgentSkip[];
@@ -306,18 +319,24 @@ export async function stampAndWrite(a: StampArgs): Promise<StampResult> {
   await writeOutputAtomic(a.outputAbs, res.pdf, a.overwrite);
   await a.cache.registerOutput(sha256Hex(res.pdf));
   let checkPath: string | undefined;
+  const warnings = [...res.warnings];
   if (a.checkAbs && res.checkPdf) {
     // Holds the answers too (it is the filled PDF, annotated): written only
     // beside the output, and registered so analyze_form refuses it.
     await writeOutputAtomic(a.checkAbs, res.checkPdf, a.overwrite);
     await a.cache.registerOutput(sha256Hex(res.checkPdf));
     checkPath = a.checkAbs;
+  } else if (a.checkAbs) {
+    // The output does not depend on the check copy: it is written above either way.
+    warnings.push(
+      `No check copy was written; the filled PDF is complete. ${checkCopyFailed(res.checkError)}`,
+    );
   }
   return {
     output_path: a.outputAbs,
     ...(checkPath ? { check_path: checkPath } : {}),
     filled: res.filled,
     skipped: res.skipped,
-    warnings: res.warnings,
+    warnings,
   };
 }

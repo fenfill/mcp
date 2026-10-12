@@ -18,6 +18,7 @@ import {
 
 import { ToolError } from "./errors.js";
 import {
+  checkCopyFailed,
   fillForbiddenError,
   isFillForbiddenError,
   isPasswordError,
@@ -298,7 +299,17 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
     if (isFillForbiddenError(e)) throw fillForbiddenError();
     throw e;
   }
-  if (!res.checkPdf) throw new ToolError("internal_error", "The check copy could not be built.");
+  if (!res.checkPdf) {
+    // The build says where it stopped (stage, and the id it was drawing), so
+    // the caller can correct that one field or group and preview again.
+    const err = res.checkError;
+    throw new ToolError("check_copy_failed", checkCopyFailed(err), {
+      hint: err?.id
+        ? `Fix or remove ${err.id} with edit_template, then preview again.`
+        : "Preview again; if it persists, fill_form / fill_template still write the filled PDF, without a check copy.",
+      details: { stage: err?.stage, id: err?.id },
+    });
+  }
 
   const legend = legendRows(a.render, a.page);
   const ids = new Set(legend.map((r) => r.id));

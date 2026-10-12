@@ -3,7 +3,7 @@
 // import neither a data source nor a store. Input is already-computed marks +
 // branding; output is the saved PDF bytes. The caller owns marks-computation,
 // the blob/download, telemetry, and success state.
-import type { PDFFont, PDFPage } from "pdf-lib";
+import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 
 import type { TextAnchor } from "@/types";
 import {
@@ -112,6 +112,82 @@ export interface Placement {
   fits: boolean;
 }
 
+/** The stamp's two faces on one document (embedStampFaces). */
+export interface StampFaces {
+  /** Width of `t` at size `s`, summed across its runs, so shrink/wrap decisions
+   *  account for the fallback face too. */
+  measure: (t: string, s: number) => number;
+  /** Draws a (possibly mixed-face) line with its left edge at (x, y). */
+  draw: (page: PDFPage, t: string, x: number, y: number, s: number, color: Color) => void;
+  /** Whether either face has a glyph for the code point; one neither has prints
+   *  as an empty box. */
+  hasGlyph: (cp: number) => boolean;
+}
+
+/**
+ * Embeds TWO faces in `pdfDoc` (which must have `fontkit` registered) and draws
+ * each glyph with the first that covers it: Inter (the brand primary — Latin +
+ * Polish diacritics + Cyrillic + Greek) with DejaVuSans as the broad-Unicode
+ * fallback (Hebrew, Arabic, …). Inter is also the on-screen stamp face
+ * (globals.css `InterStamp`, textFit.ts STAMP_FONT_FAMILY), so the preview
+ * matches the print. pdf-lib subsets each on embed, so the ttf size barely
+ * affects the output PDF. Shared by stampPdf and the MCP's check copy
+ * (agentValues.ts), so anything drawn on a stamped page can show what a stamped
+ * value can.
+ */
+export async function embedStampFaces(
+  pdfDoc: PDFDocument,
+  fontkit: Parameters<PDFDocument["registerFontkit"]>[0],
+  fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
+): Promise<StampFaces> {
+  const interFont = await pdfDoc.embedFont(fonts.inter, { subset: true });
+  const dejaFont = await pdfDoc.embedFont(fonts.deja, { subset: true });
+
+  // Per-codepoint coverage of the primary face (fontkit reads the cmap). Glyphs
+  // Inter lacks fall through to DejaVu.
+  const interKit = fontkit.create(new Uint8Array(fonts.inter));
+  const covers = (cp: number): boolean => {
+    try {
+      return interKit.hasGlyphForCodePoint(cp);
+    } catch {
+      return false;
+    }
+  };
+
+  // Split a string into maximal runs sharing one face (Inter where covered, else
+  // DejaVu), so a mixed-script value renders every glyph instead of tofu.
+  const splitRuns = (t: string): { font: PDFFont; text: string }[] =>
+    splitByCoverage(t, (cp) => (covers(cp) ? interFont : dejaFont)).map((r) => ({
+      font: r.key,
+      text: r.text,
+    }));
+
+  // Injected MeasureText for the font-agnostic fit helpers: total width across the
+  // runs so shrink/wrap decisions account for the fallback face too.
+  const measure = (t: string, s: number): number =>
+    splitRuns(t).reduce((sum, r) => sum + r.font.widthOfTextAtSize(r.text, s), 0);
+
+  // Draw a (possibly mixed-face) line with its left edge at (x, y), advancing x by
+  // each run's width.
+  const draw = (page: PDFPage, t: string, x: number, y: number, s: number, color: Color) => {
+    let cx = x;
+    for (const r of splitRuns(t)) {
+      page.drawText(r.text, { x: cx, y, size: s, font: r.font, color });
+      cx += r.font.widthOfTextAtSize(r.text, s);
+    }
+  };
+
+  // The fallback's code points, read only once Inter lacks one.
+  let dejaSet: Set<number> | undefined;
+  const hasGlyph = (cp: number): boolean => {
+    if (covers(cp)) return true;
+    dejaSet ??= new Set(dejaFont.getCharacterSet());
+    return dejaSet.has(cp);
+  };
+
+  return { measure, draw, hasGlyph };
+}
+
 /**
  * Loads the source PDF, stamps the marks plus the branding/PLG watermark and the
  * workspace logo, and returns the saved bytes. Throws on font-fetch failure; the
@@ -151,12 +227,8 @@ export async function stampPdf({
   // editable and baked widget backgrounds sit under the stamped answers.
   flattenFormFields(pdfDoc, pdfLib);
 
-  // Embed TWO faces and draw each glyph with the first that covers it: Inter (the
-  // brand primary — Latin + Polish diacritics + Cyrillic + Greek) with DejaVuSans
-  // as the broad-Unicode fallback (Hebrew, Arabic, …). Inter is also the on-screen
-  // stamp face (globals.css `InterStamp`, textFit.ts STAMP_FONT_FAMILY), so the
-  // preview matches the print. pdf-lib subsets each on embed, so the fetched ttf
-  // size barely affects the output PDF.
+  // The two stamp faces (Inter + the DejaVuSans fallback; see embedStampFaces).
+  // The fetched ttf size barely affects the output: each is subset on embed.
   const [interBytes, dejaBytes] = fonts
     ? [fonts.inter, fonts.deja]
     : await Promise.all([
@@ -169,44 +241,15 @@ export async function stampPdf({
           return r.arrayBuffer();
         }),
       ]);
-  const interFont = await pdfDoc.embedFont(interBytes, { subset: true });
-  const dejaFont = await pdfDoc.embedFont(dejaBytes, { subset: true });
+  const faces = await embedStampFaces(pdfDoc, fontkit, { inter: interBytes, deja: dejaBytes });
   const pdfPages = pdfDoc.getPages();
 
   const INK = rgb(0.1, 0.1, 0.1);
 
-  // Per-codepoint coverage of the primary face (fontkit reads the cmap). Glyphs
-  // Inter lacks fall through to DejaVu.
-  const interKit = fontkit.create(new Uint8Array(interBytes));
-  const covers = (cp: number): boolean => {
-    try {
-      return interKit.hasGlyphForCodePoint(cp);
-    } catch {
-      return false;
-    }
-  };
-
-  // Split a string into maximal runs sharing one face (Inter where covered, else
-  // DejaVu), so a mixed-script value renders every glyph instead of tofu.
-  const splitRuns = (t: string): { font: PDFFont; text: string }[] =>
-    splitByCoverage(t, (cp) => (covers(cp) ? interFont : dejaFont)).map((r) => ({
-      font: r.key,
-      text: r.text,
-    }));
-
-  // Injected MeasureText for the font-agnostic fit helpers: total width across the
-  // runs so shrink/wrap decisions account for the fallback face too.
-  const measure = (t: string, s: number): number =>
-    splitRuns(t).reduce((sum, r) => sum + r.font.widthOfTextAtSize(r.text, s), 0);
-
-  // Draw a (possibly mixed-face) line with its left edge at (x, y), advancing x by
-  // each run's width.
+  // Injected MeasureText for the font-agnostic fit helpers.
+  const { measure } = faces;
   const drawMixed = (page: PDFPage, t: string, x: number, y: number, s: number) => {
-    let cx = x;
-    for (const r of splitRuns(t)) {
-      page.drawText(r.text, { x: cx, y, size: s, font: r.font, color: INK });
-      cx += r.font.widthOfTextAtSize(r.text, s);
-    }
+    faces.draw(page, t, x, y, s, INK);
   };
 
   // Draw a preset checkbox mark (✓ ✗ ■) as a vector, sized to a centered square

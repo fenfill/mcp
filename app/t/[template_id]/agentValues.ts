@@ -35,7 +35,7 @@ import {
 import { buildMarks } from "./fillMarks";
 import { normalizeSchema } from "./normalizeSchema";
 import { dataUrlToBytes } from "./signatureImage";
-import { type Mark, type Placement, stampPdf } from "./stampPdf";
+import { embedStampFaces, type Mark, type Placement, stampPdf } from "./stampPdf";
 
 /** Info-dictionary key the MCP writes into every PDF it fills (and refuses to analyze). */
 export const MCP_OUTPUT_TAG = "FenfillMcpOutput";
@@ -1107,6 +1107,32 @@ interface Rect {
 const hits = (a: Rect, b: Rect) =>
   a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
+const causeOf = (e: unknown): string => (e instanceof Error && e.message ? e.message : String(e));
+
+/** Header text on one line: each run of whitespace and control characters is one space. */
+const oneLine = (s: string): string => s.replace(/[\s\p{Cc}]+/gu, " ").trim();
+
+/** Printable ASCII, anything else as "?": Helvetica (WinAnsi) throws on a
+ *  character it cannot encode. */
+const asciiOnly = (s: string): string => s.replace(/[^\x20-\x7e]/g, "?");
+
+/** What the check copy's build was doing: a stage, and the id it was on. */
+interface CheckStep {
+  stage: string;
+  id?: string;
+}
+
+/** A failed check copy: the step it stopped at, and the cause as its message. */
+class CheckCopyError extends Error {
+  readonly at: CheckStep;
+
+  constructor(at: CheckStep, cause: unknown) {
+    super(causeOf(cause));
+    this.name = "CheckCopyError";
+    this.at = { ...at };
+  }
+}
+
 /**
  * The check copy of a filled PDF: every agent entry's box outlined in its
  * status colour and tagged with a short id prefix (radio options too; table
@@ -1114,15 +1140,44 @@ const hits = (a: Rect, b: Rect) =>
  * plus a legend line on page 1 unless `banner` is false. Built from the
  * stamped bytes, so it shows exactly what the output holds. Local only, like
  * the output itself.
+ *
+ * `notes` say what it could not draw as written (a table header, in the
+ * warnings' `<id>: …` form). A failure is thrown as a CheckCopyError naming the
+ * step it stopped at.
  */
 async function buildCheckPdf(
   stamped: Uint8Array,
   entries: readonly AgentEntry[],
   status: (id: string) => CheckStatus,
+  fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
   banner = true,
-): Promise<Uint8Array> {
+): Promise<{ pdf: Uint8Array; notes: string[] }> {
+  const at: CheckStep = { stage: "load" };
+  try {
+    return await drawCheckPdf(stamped, entries, status, fonts, banner, at);
+  } catch (e) {
+    throw new CheckCopyError(at, e);
+  }
+}
+
+/** buildCheckPdf's body. `at` is kept on the step in progress. */
+async function drawCheckPdf(
+  stamped: Uint8Array,
+  entries: readonly AgentEntry[],
+  status: (id: string) => CheckStatus,
+  fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
+  banner: boolean,
+  at: CheckStep,
+): Promise<{ pdf: Uint8Array; notes: string[] }> {
+  const step = (stage: string, id?: string) => {
+    at.stage = stage;
+    at.id = id;
+  };
+  const notes: string[] = [];
   const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
   const doc = await PDFDocument.load(stamped, { updateMetadata: false });
+  step("fonts");
+  // Ids (tags) and the legend line are ASCII: Helvetica, with no font bytes.
   const helv = await doc.embedFont(StandardFonts.Helvetica);
   const pages = doc.getPages();
   const COLORS: Record<CheckStatus, ReturnType<typeof rgb>> = {
@@ -1141,6 +1196,7 @@ async function buildCheckPdf(
   };
   const boxes: Outline[] = [];
   for (const e of entries) {
+    step("outline", e.id);
     const st = status(e.id);
     if (e.kind === "field") {
       boxes.push({ id: e.id, page: e.field.page, box: e.field, st, thin: false, tagged: true });
@@ -1157,6 +1213,7 @@ async function buildCheckPdf(
         boxes.push({ id: c.id, page: c.field.page, box: c.field, st, thin: true, tagged: false });
     }
   }
+  step("tag");
   const short = shortIds(checkTagIds(entries));
   const SIZE = 5;
   // Page-point rects of every outline per page: a tag must not cover a box
@@ -1171,63 +1228,129 @@ async function buildCheckPdf(
   // (R: row header, C: column header) so the agent can compare them with the
   // form's printed headers beside them. Cells carry no tags, so it's free.
   const HEAD = 4;
-  const heads: {
-    page: (typeof pages)[number];
-    text: string;
-    opts: Parameters<(typeof pages)[number]["drawText"]>[1];
-  }[] = [];
   const headColor = rgb(0.15, 0.35, 0.75);
+  interface Head {
+    gid: string;
+    axis: "row" | "column";
+    /** 0-based, as edit_template's set_header counts. */
+    index: number;
+    text: string;
+    cell: AgentCell;
+    page: (typeof pages)[number];
+    below: number;
+  }
+  const wanted: Head[] = [];
   for (const e of entries) {
     if (e.kind !== "table") continue;
+    step("table headers", e.id);
     const g = e.group as { header_rows?: unknown; header_cols?: unknown };
     const texts = (v: unknown): unknown[] => (Array.isArray(v) ? (v as unknown[]) : []);
+    const lineOf = (raw: unknown): string => (typeof raw === "string" ? oneLine(raw) : "");
     const firstOf = (key: "row" | "col", k: number): AgentCell | undefined =>
       e.cells
         .filter((c) => c[key] === k)
         .sort((a, b) => (key === "row" ? a.col - b.col : a.row - b.row))
         .at(0);
-    const draw = (prefix: string, raw: unknown, cell: AgentCell | undefined, below: number) => {
-      if (typeof raw !== "string" || !raw.trim() || !cell) return;
+    const want = (
+      axis: Head["axis"],
+      index: number,
+      raw: unknown,
+      cell: AgentCell | undefined,
+      below: number,
+    ) => {
+      const text = lineOf(raw);
+      if (!text || !cell) return;
       const page = pages[cell.field.page - 1] as (typeof pages)[number] | undefined;
-      if (!page) return;
-      const { width: pw, height: ph } = page.getSize();
-      const cx = (cell.field.xpct / 100) * pw;
-      const top = ph - (cell.field.ypct / 100) * ph;
-      const w = (cell.field.wpct / 100) * pw;
-      const h = (cell.field.hpct / 100) * ph;
-      // Inside the cell when it has room; a narrow cell (a checkbox grid) gets
-      // the row header just left of it and the column header just above it.
-      const inside = w >= 40 && h >= HEAD + 1;
-      const room = inside ? w - 1 : prefix === "R" ? Math.min(120, cx - 1) : Math.max(2 * w, 30);
-      let text = `${prefix}: ${raw.trim()}`;
-      while (text.length > 4 && helv.widthOfTextAtSize(text, HEAD) > room) {
-        text = `${text.slice(0, -2)}…`;
-      }
-      const tw = helv.widthOfTextAtSize(text, HEAD);
-      const x = inside ? cx + 0.6 : prefix === "R" ? cx - tw - 0.8 : cx;
-      const y = inside
-        ? top - HEAD - 0.4 - below
-        : prefix === "R"
-          ? top - h / 2 - HEAD / 2
-          : top + 0.6; // outside: the row header sits left, so no clash to dodge
-      heads.push({ page, text, opts: { x, y, size: HEAD, font: helv, color: headColor } });
-      // Reserve the spot: the id tags placed next steer clear of it.
-      const taken = placedTags.get(cell.field.page) ?? [];
-      taken.push({ x, y, w: tw, h: HEAD + 0.6 });
-      placedTags.set(cell.field.page, taken);
+      if (page) wanted.push({ gid: e.id, axis, index, text, cell, page, below });
     };
     texts(g.header_rows).forEach((t, r) => {
-      draw("R", t, firstOf("row", r), 0);
+      want("row", r, t, firstOf("row", r), 0);
     });
     // A column header shares the top-left cell with row 0's: put it one line lower there.
     texts(g.header_cols).forEach((t, c) => {
       const cell = firstOf("col", c);
       const shared = cell !== undefined && cell.col === firstOf("row", cell.row)?.col;
-      const rowHead = cell ? texts(g.header_rows)[cell.row] : undefined;
-      draw("C", t, cell, shared && typeof rowHead === "string" && rowHead.trim() ? HEAD + 0.6 : 0);
+      const rowHead = cell ? lineOf(texts(g.header_rows)[cell.row]) : "";
+      want("column", c, t, cell, shared && rowHead ? HEAD + 0.6 : 0);
     });
   }
+  const heads: { head: Head; draw: () => void }[] = [];
+  const dropped = (h: Head, e: unknown) =>
+    `${h.gid}: ${h.axis} header ${String(h.index)} could not be drawn in the check copy: ${causeOf(e)}`;
+  if (wanted.length > 0) {
+    // Headers are the form's own wording, in any script, so they are drawn with
+    // the stamp's two faces. Those are embedded only when a header is drawn: a
+    // check copy without one stays byte for byte what Helvetica alone makes it.
+    step("fonts");
+    const { default: fontkit } = await import("@pdf-lib/fontkit");
+    doc.registerFontkit(fontkit);
+    const faces = await embedStampFaces(doc, fontkit, fonts);
+    const unreadable = new Set<string>();
+    for (const h of wanted) {
+      step("table headers", h.gid);
+      // One header that cannot be laid out is left out and reported, never fatal.
+      try {
+        const { cell, page } = h;
+        const prefix = h.axis === "row" ? "R" : "C";
+        const { width: pw, height: ph } = page.getSize();
+        const cx = (cell.field.xpct / 100) * pw;
+        const top = ph - (cell.field.ypct / 100) * ph;
+        const w = (cell.field.wpct / 100) * pw;
+        const ht = (cell.field.hpct / 100) * ph;
+        // Inside the cell when it has room; a narrow cell (a checkbox grid) gets
+        // the row header just left of it and the column header just above it.
+        const inside = w >= 40 && ht >= HEAD + 1;
+        const room = inside ? w - 1 : prefix === "R" ? Math.min(120, cx - 1) : Math.max(2 * w, 30);
+        // By code point (no split surrogate pairs). A character neither face has
+        // would print as an empty box: show "?" and say so, once per table.
+        const chars = Array.from(`${prefix}: ${h.text}`, (ch) =>
+          faces.hasGlyph(ch.codePointAt(0) ?? 0) ? ch : "?",
+        );
+        if (chars.join("") !== `${prefix}: ${h.text}` && !unreadable.has(h.gid)) {
+          unreadable.add(h.gid);
+          notes.push(
+            `${h.gid}: the check copy cannot draw some header characters (shown as "?"); the legend's header_rows / header_cols hold the full text`,
+          );
+        }
+        // Too wide: the longest prefix that fits, plus "…", found by bisection
+        // (one text layout per probe, not one per dropped character). The
+        // 3-character "R: …" is kept even when that is still too wide.
+        const cut = (n: number) => `${chars.slice(0, n).join("")}…`;
+        let text = chars.join("");
+        if (chars.length > 4 && faces.measure(text, HEAD) > room) {
+          let lo = 3;
+          let hi = chars.length - 2;
+          while (lo < hi) {
+            const mid = Math.ceil((lo + hi) / 2);
+            if (faces.measure(cut(mid), HEAD) <= room) lo = mid;
+            else hi = mid - 1;
+          }
+          text = cut(lo);
+        }
+        const tw = faces.measure(text, HEAD);
+        const x = inside ? cx + 0.6 : prefix === "R" ? cx - tw - 0.8 : cx;
+        const y = inside
+          ? top - HEAD - 0.4 - h.below
+          : prefix === "R"
+            ? top - ht / 2 - HEAD / 2
+            : top + 0.6; // outside: the row header sits left, so no clash to dodge
+        heads.push({
+          head: h,
+          draw: () => {
+            faces.draw(page, text, x, y, HEAD, headColor);
+          },
+        });
+        // Reserve the spot: the id tags placed next steer clear of it.
+        const taken = placedTags.get(cell.field.page) ?? [];
+        taken.push({ x, y, w: tw, h: HEAD + 0.6 });
+        placedTags.set(cell.field.page, taken);
+      } catch (e) {
+        notes.push(dropped(h, e));
+      }
+    }
+  }
   for (const b of boxes) {
+    step("outline", b.id);
     const page = pages[b.page - 1] as (typeof pages)[number] | undefined;
     if (!page) continue;
     const { width: pw, height: ph } = page.getSize();
@@ -1246,7 +1369,8 @@ async function buildCheckPdf(
       borderOpacity: 0.9,
     });
     if (!b.tagged) continue;
-    const tag = short.get(b.id) ?? b.id;
+    step("tag", b.id);
+    const tag = asciiOnly(short.get(b.id) ?? b.id);
     const tw = helv.widthOfTextAtSize(tag, SIZE) + 1.6;
     const th = SIZE + 1.2;
     // Candidate spots, preferred first: just above the box (top-right when the
@@ -1292,7 +1416,15 @@ async function buildCheckPdf(
     });
     page.drawText(tag, { x: spot.x + 0.8, y: spot.y + 0.8, size: SIZE, font: helv, color });
   }
-  for (const h of heads) h.page.drawText(h.text, h.opts);
+  for (const h of heads) {
+    step("table headers", h.head.gid);
+    try {
+      h.draw();
+    } catch (e) {
+      notes.push(dropped(h.head, e));
+    }
+  }
+  step("banner");
   const first = pages[0] as (typeof pages)[number] | undefined;
   if (first && banner) {
     const legend =
@@ -1300,7 +1432,8 @@ async function buildCheckPdf(
     const { height: ph } = first.getSize();
     first.drawText(legend, { x: 6, y: ph - 7, size: SIZE, font: helv, color: rgb(0.3, 0.3, 0.35) });
   }
-  return doc.save();
+  step("save");
+  return { pdf: await doc.save(), notes };
 }
 
 export interface FillAgentPdfArgs {
@@ -1324,9 +1457,15 @@ export interface FillAgentPdfResult {
   filled: number;
   skipped: AgentSkip[];
   /** Mapping warnings, then placement warnings (text shrunk hard or running
-   *  past its box, filled boxes printing over each other). */
+   *  past its box, filled boxes printing over each other), then, with `check`,
+   *  what the check copy could not draw as written (a table header). */
   warnings: string[];
   checkPdf?: Uint8Array;
+  /** With `check`, when the check copy could not be built: the stage it stopped
+   *  at (load, fonts, table headers, outline, tag, banner, save), the id of the
+   *  field, option, cell or group it was on, and the cause. `pdf` is complete
+   *  either way: the check copy is built from it afterwards. */
+  checkError?: { stage: string; id?: string; message: string };
 }
 
 /** normalizeSchema → mapAgentValues → buildMarks (whole document) → stampPdf,
@@ -1365,19 +1504,29 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
     const warned = new Set(
       placed.flatMap((w) => w.slice(0, w.indexOf(":")).split(" and ").map(topId)),
     );
-    res.checkPdf = await buildCheckPdf(
-      pdf,
-      m.entries,
-      (id) =>
-        skippedIds.has(id)
-          ? "skipped"
-          : warned.has(id)
-            ? "warned"
-            : m.filledIds.has(id)
-              ? "filled"
-              : "empty",
-      a.checkBanner !== false,
-    );
+    // The output never depends on the check copy: a failed one is reported
+    // (checkError), not thrown.
+    try {
+      const built = await buildCheckPdf(
+        pdf,
+        m.entries,
+        (id) =>
+          skippedIds.has(id)
+            ? "skipped"
+            : warned.has(id)
+              ? "warned"
+              : m.filledIds.has(id)
+                ? "filled"
+                : "empty",
+        a.fonts,
+        a.checkBanner !== false,
+      );
+      res.checkPdf = built.pdf;
+      warnings.push(...built.notes);
+    } catch (e) {
+      const at: CheckStep = e instanceof CheckCopyError ? e.at : { stage: "build" };
+      res.checkError = { stage: at.stage, ...(at.id ? { id: at.id } : {}), message: causeOf(e) };
+    }
   }
   return res;
 }

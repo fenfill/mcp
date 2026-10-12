@@ -1,31 +1,65 @@
-// The check copy's page-1 banner: fill_form's check PDF keeps it, preview_page
-// (checkBanner: false) drops it — its JSON already carries the colour key.
+// The check copy (fillAgentPdf with `check`, and preview_page on top of it): its
+// page-1 banner (fill_form's check PDF keeps it, preview_page drops it — its
+// JSON already carries the colour key), a table's headers in any script, and
+// what a build that fails reports.
 
-import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
-import { decodePDFRawStream, PDFDocument, PDFRawStream } from "pdf-lib";
+import { PDFPage } from "pdf-lib";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fillAgentPdf } from "@/app/t/[template_id]/fillCore";
+import { extractStampedText } from "@/e2e/helpers/pdfText";
 
+import { agentEntries, fillAgentPdf, normalizeSchema } from "@/app/t/[template_id]/fillCore";
+
+import { Cache } from "../src/cache.js";
 import { applyOps } from "../src/edits.js";
-import { loadImage } from "../src/fill.js";
+import { ToolError } from "../src/errors.js";
+import { loadImage, stampAndWrite } from "../src/fill.js";
 import { loadFonts, toArrayBuffer } from "../src/fonts.js";
-import { fixture, pdfFor } from "./helpers.js";
+import { previewPage } from "../src/preview.js";
+import { pageText } from "../src/render.js";
+import type { RenderSchema } from "../src/types.js";
+import { fixture, pdfFor, tmp } from "./helpers.js";
 
-/** Page 1's content streams, decoded; pdf-lib writes Helvetica text as hex strings. */
-async function page1Has(pdf: Uint8Array, text: string): Promise<boolean> {
-  const doc = await PDFDocument.load(pdf);
-  const hex = Buffer.from(text, "latin1").toString("hex").toUpperCase();
-  const contents = doc.getPages()[0].node.Contents();
-  const refs = contents ? ("asArray" in contents ? contents.asArray() : [contents]) : [];
-  for (const r of refs) {
-    const st = doc.context.lookup(r);
-    if (!(st instanceof PDFRawStream)) continue;
-    const body = Buffer.from(decodePDFRawStream(st).decode()).toString("latin1").toUpperCase();
-    if (body.includes(hex) || body.includes(text.toUpperCase())) return true;
-  }
-  return false;
+/** Page 1's text layer as PDFium reads it (what preview_page renders), one
+ *  character per glyph. pageText skips whitespace. */
+async function page1Chars(pdf: Uint8Array): Promise<string[]> {
+  return (await pageText(pdf, 1)).glyphs.map((g) => g.char);
 }
+
+/** Whether page 1 prints `text` (whitespace ignored). Headers are drawn in an
+ *  embedded face, so the content stream holds glyph ids, not the characters. */
+async function page1Has(pdf: Uint8Array, text: string): Promise<boolean> {
+  return (await page1Chars(pdf)).join("").includes(text.replace(/\s+/g, ""));
+}
+
+const isPng = (b: Uint8Array) =>
+  Buffer.from(b.subarray(0, 8)).equals(
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  );
+
+/** fillAgentPdf with `check`, no values and no banner, as preview_page calls it. */
+const checked = async (render: RenderSchema, pdf?: Uint8Array) =>
+  fillAgentPdf({
+    pdfBytes: toArrayBuffer(pdf ?? (await pdfFor(render))),
+    render,
+    input: {},
+    fonts: loadFonts(),
+    branding: null,
+    logoBytes: null,
+    loadImage,
+    check: true,
+    checkBanner: false,
+  });
+
+const preview = (render: RenderSchema, pdf: Uint8Array, page: number) =>
+  previewPage({ pdfBytes: pdf, render, page, values: {}, fonts: loadFonts() });
+
+/** Holds ł ą ę ż ź ć ń ó ś: of the nine, only ó is in WinAnsi. */
+const POLISH = "Zażółć gęślą jaźń";
+const TABLE = "391f4376-9964-5238-bb76-582e8a0772f7";
 
 describe("check copy banner", () => {
   it("is on page 1 by default and gone with checkBanner: false", async () => {
@@ -74,5 +108,186 @@ describe("check copy table headers", () => {
     });
     expect(await page1Has(out.checkPdf!, "R: Alpha")).toBe(true);
     expect(await page1Has(out.checkPdf!, "C: Beta")).toBe(true);
+  });
+
+  it("draws headers outside WinAnsi, and every page still previews", async () => {
+    // A second page with no table: one header used to fail the whole document.
+    const { render: tables } = fixture("classic_tables");
+    const page2 = fixture("ungrouped_fields").render.fields.filter((f) => f.page === 2);
+    expect(page2.length).toBeGreaterThan(0);
+    const two: RenderSchema = {
+      ...tables,
+      pages: [...tables.pages, { ...tables.pages[0], page: 2 }],
+      fields: [...tables.fields, ...page2],
+    };
+    const r = applyOps(two, [
+      { op: "set_headers", id: TABLE, axis: "row", texts: [`${POLISH} 1`, `${POLISH} 2`] },
+      { op: "set_headers", id: TABLE, axis: "col", texts: [`${POLISH} A`, `${POLISH} B`] },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const pdf = await pdfFor(r.render);
+
+    for (const page of [1, 2]) {
+      const pv = await preview(r.render, pdf, page);
+      expect(isPng(pv.png)).toBe(true);
+      expect(pv.warnings).toEqual([]);
+    }
+    const out = await checked(r.render, pdf);
+    expect(out.checkError).toBeUndefined();
+    expect(out.warnings).toEqual([]);
+    for (const text of [`R: ${POLISH} 1`, `R: ${POLISH} 2`, `C: ${POLISH} A`, `C: ${POLISH} B`]) {
+      expect(await page1Has(out.checkPdf!, text)).toBe(true);
+    }
+  });
+
+  it("previews a form whose field and option labels are outside WinAnsi", async () => {
+    // Labels are never drawn (they go in the legend); they must not matter.
+    const { render } = fixture("canonical");
+    const options = [`${POLISH} tak`, `${POLISH} nie`];
+    const r = applyOps(render, [
+      { op: "relabel", id: "f-text", label: POLISH },
+      { op: "set_options", id: "g-choice", options },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const pv = await preview(r.render, await pdfFor(r.render), 1);
+    expect(isPng(pv.png)).toBe(true);
+    // The fixture's own warning (a required field, no values), and nothing else.
+    expect(pv.warnings).toEqual([`f-text: required ("${POLISH}") but left empty`]);
+    expect(pv.legend.find((row) => row.id === "f-text")?.label).toBe(POLISH);
+    expect(pv.legend.find((row) => row.id === "g-choice")?.options?.map((o) => o.label)).toEqual(
+      options,
+    );
+  });
+
+  it("puts a header with line breaks on one line, and uses the fallback face", async () => {
+    // WinAnsi has no newline either, so this failed for plain English headers.
+    // Hebrew is in DejaVuSans only: drawn, not replaced.
+    const { render } = fixture("classic_tables");
+    const r = applyOps(render, [
+      { op: "set_headers", id: TABLE, axis: "col", texts: ["First\nsecond\tthird", "שלום"] },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const pdf = await pdfFor(r.render);
+    const out = await checked(r.render, pdf);
+    expect(out.warnings).toEqual([]);
+    expect(await page1Has(out.checkPdf!, "C: First second third")).toBe(true);
+    const chars = await page1Chars(out.checkPdf!);
+    for (const ch of "שלום") expect(chars).toContain(ch);
+    expect(chars).not.toContain("?");
+    expect(isPng((await preview(r.render, pdf, 1)).png)).toBe(true);
+  });
+
+  it('shows a character neither face has as "?" and says so once per table', async () => {
+    const { render } = fixture("classic_tables");
+    const texts = ["学校 School", "年 Year", "Plain"];
+    const r = applyOps(render, [{ op: "set_headers", id: TABLE, axis: "col", texts }]);
+    expect(r.rejected).toEqual([]);
+    const pdf = await pdfFor(r.render);
+    const note = `${TABLE}: the check copy cannot draw some header characters (shown as "?"); the legend's header_rows / header_cols hold the full text`;
+
+    const out = await checked(r.render, pdf);
+    expect(out.checkError).toBeUndefined();
+    expect(out.warnings).toEqual([note]);
+    expect(await page1Has(out.checkPdf!, "C: ?? School")).toBe(true);
+    expect(await page1Has(out.checkPdf!, "C: ? Year")).toBe(true);
+    expect(await page1Has(out.checkPdf!, "C: Plain")).toBe(true);
+
+    // preview_page lists the note with the page's warnings; the legend has the text.
+    const pv = await preview(r.render, pdf, 1);
+    expect(isPng(pv.png)).toBe(true);
+    expect(pv.warnings).toEqual([note]);
+    expect(pv.legend.find((row) => row.id === TABLE)?.header_cols).toEqual(texts);
+  });
+
+  it("leaves out one header that cannot be drawn, says which, and builds the rest", async () => {
+    // The fixture's columns are Name, Born, School: the second one fails to draw.
+    const { render } = fixture("classic_tables");
+    const drawText = PDFPage.prototype.drawText;
+    const spy = vi.spyOn(PDFPage.prototype, "drawText").mockImplementation(function (
+      this: PDFPage,
+      ...args: Parameters<PDFPage["drawText"]>
+    ) {
+      if (args[0].startsWith("C: Born")) throw new Error("no ink");
+      drawText.apply(this, args);
+    });
+    try {
+      const out = await checked(render);
+      expect(out.checkError).toBeUndefined();
+      // The header's index counts from 0, as edit_template's set_header does.
+      expect(out.warnings).toEqual([
+        `${TABLE}: column header 1 could not be drawn in the check copy: no ink`,
+      ]);
+      expect(await page1Has(out.checkPdf!, "C: Name")).toBe(true);
+      expect(await page1Has(out.checkPdf!, "C: School")).toBe(true);
+      expect(await page1Has(out.checkPdf!, "C: Born")).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("a check copy that cannot be built", () => {
+  // Every outline is a pdf-lib rectangle. With no values nothing else draws
+  // one, so making it throw stops the build at its first box.
+  const breakOutlines = () =>
+    vi.spyOn(PDFPage.prototype, "drawRectangle").mockImplementation(() => {
+      throw new Error("no rectangles today");
+    });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const { render } = fixture("ungrouped_fields");
+  const first = agentEntries(
+    normalizeSchema(render as unknown as Parameters<typeof normalizeSchema>[0]),
+  )[0].id;
+  const cause = `The check copy could not be built (outline, ${first}): no rectangles today`;
+
+  it("preview_page answers check_copy_failed with the stage and the id", async () => {
+    const pdf = await pdfFor(render);
+    breakOutlines();
+    const err: unknown = await preview(render, pdf, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ToolError);
+    expect((err as ToolError).toJSON()).toEqual({
+      code: "check_copy_failed",
+      message: cause,
+      hint: `Fix or remove ${first} with edit_template, then preview again.`,
+      stage: "outline",
+      id: first,
+    });
+  });
+
+  it("a fill still writes its output, leaves check_path out and says why", async () => {
+    const t = tmp();
+    try {
+      const pdf = await pdfFor(render);
+      const out = join(t.dir, "filled.pdf");
+      const check = join(t.dir, "filled.check.pdf");
+      const nameId = render.fields.find((f) => f.label === "Full name")!.id;
+      breakOutlines();
+      const res = await stampAndWrite({
+        pdfBytes: pdf,
+        render,
+        agentInput: { [nameId]: "Ada Lovelace" },
+        fonts: loadFonts(),
+        branding: null,
+        logoBytes: null,
+        outputAbs: out,
+        overwrite: false,
+        cache: new Cache(join(t.dir, "cache")),
+        checkAbs: check,
+      });
+      expect(res).toMatchObject({ output_path: out, filled: 1 });
+      expect(res).not.toHaveProperty("check_path");
+      expect(existsSync(check)).toBe(false);
+      expect(res.warnings.at(-1)).toBe(
+        `No check copy was written; the filled PDF is complete. ${cause}`,
+      );
+      // The field prints in capitals.
+      const written = new Uint8Array(readFileSync(out));
+      expect((await extractStampedText(written, 0)).toLowerCase()).toContain("ada lovelace");
+    } finally {
+      t.cleanup();
+    }
   });
 });

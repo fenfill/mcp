@@ -138,7 +138,8 @@ workspace, free native-field (AcroForm) ones included.
 a text/date field's stored `format` and `font_pt` (the size its value starts at; `font_auto`
 when that follows the box height); a choice's options with their own boxes; a table's cells by
 `(row, col)`, its `orientation` and headers (also printed on the image inside, or beside, the
-first cell of each line as `R: …` / `C: …`); a `table_rows` table's columns and printed cells
+first cell of each line as `R: …` / `C: …`; a character the bundled fonts lack is shown as `?`
+there, with a warning, and the legend keeps the full text); a `table_rows` table's columns and printed cells
 with their boxes (fill values still go by column id). `warnings` and `placement_warnings` are
 always present (`[]` = checked and clean): placement covers every box shown, so a plain preview
 is a read-only placement audit (see the checks under `edit_template`). `crop`
@@ -314,6 +315,7 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 | `too_many_active_jobs`                | Other analyses in the workspace (free native-field ones too) are still running; try again in a minute, or analyze fewer at once.                               |
 | `template_conflict`                   | The template changed in fenfill since your edits began. Your local edits are kept: `edit_template` with `discard: true`, re-apply the ops, save again.         |
 | `invalid_schema`                      | fenfill (or the local check before it) refused the edited layout; `details` lists each item and reason. Fix them with `edit_template`.                         |
+| `check_copy_failed`                   | `preview_page` could not build its outlined copy; `stage` and `id` say where. Fix or remove that field or group with `edit_template`, then preview again.      |
 | `request_too_large`                   | The edited template is too large to save in one request.                                                                                                       |
 | `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent. Put the form's own wording back with `edit_template`.                                 |
 | `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.      |
