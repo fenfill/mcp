@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ApiIdentity, CachedAnalysis } from "../src/cache.js";
 import { analysisName, pagesToSpec } from "../src/cache.js";
 import { jobCovers } from "../src/analyze.js";
-import { COMPACT_MAX_CHARS, compactView, strip } from "../src/compact.js";
+import { COMPACT_MAX_CHARS, compactView, nestBySection, strip } from "../src/compact.js";
 import { cacheHit, extraBlankPages, mergeAnalyses } from "../src/merge.js";
 import { parsePageSpec } from "../src/pages.js";
 import type { AgentEntry, AgentSchema, RenderSchema } from "../src/types.js";
@@ -282,6 +282,39 @@ describe("the merged view lists only what the merged render can fill", () => {
 
 describe("compactView", () => {
   const { agent } = fixture("canonical");
+
+  it("lists a section as one block with its id, and entries in no section where they stand", () => {
+    const A = { id: "sec-a", title: "Header" };
+    const B = { id: "sec-b", title: "Income" };
+    const e = (id: string, page: number, section: typeof A | null): AgentEntry =>
+      ({ ...agent.fields[0], id, page, section }) as AgentEntry;
+    const blocks = nestBySection([
+      e("a1", 1, A),
+      e("a2", 1, A),
+      e("l1", 1, null),
+      e("b1", 1, B),
+      e("l2", 1, null),
+      e("l3", 1, null),
+      e("p2", 2, null), // a new page starts a new block
+      e("p3", 2, A), // page 2's own section of the same id
+    ]);
+    expect(
+      blocks.map((b) => [
+        b.page,
+        b.section_id,
+        b.title,
+        b.fields.map((f) => (f as { id: string }).id),
+      ]),
+    ).toEqual([
+      [1, "sec-a", "Header", ["a1", "a2"]],
+      [1, undefined, undefined, ["l1"]],
+      [1, "sec-b", "Income", ["b1"]],
+      [1, undefined, undefined, ["l2", "l3"]],
+      [2, undefined, undefined, ["p2"]],
+      [2, "sec-a", "Header", ["p3"]],
+    ]);
+    expect("section_id" in blocks[1]).toBe(false);
+  });
 
   it("drops box, nests by section and strips null/false", () => {
     const v = compactView(agent, null, "narrow");

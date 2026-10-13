@@ -127,14 +127,20 @@ cancelling the call ends the wait. `too_many_active_jobs` counts every running a
 workspace, free native-field (AcroForm) ones included.
 
 `fill_form` and `fill_template` take `values`, `output_path` (a new `.pdf`) and optional
-`overwrite`. They never overwrite the input PDF.
+`overwrite`. They never overwrite the input PDF. In `values` (here and in `preview_page`), an id
+may be shortened to an unambiguous prefix of 6+ characters, the length of the preview tags; that
+goes for a table's cell or column ids inside its value too. A key that matches nothing is listed
+in `skipped`.
 
 ### Previews and corrections
 
 `preview_page` takes `path` (an analyzed PDF) or `template_id`, a 1-based `page`, optional
 `values` (to see them stamped; the same shapes as `fill_form`, e.g. `table_rows` =
 `[{columnId: value}, …]`, `multiselect` = an array of option ids or labels) and `dpi` (default
-110, max 200). It returns a PNG image plus a legend: each box's tag, id, type, label and `box`;
+110, max 200). The image's longest side is capped at 2,000 px, the size clients show without
+shrinking it, so the `width` and `height` in the result are the image the agent sees; the
+result's `dpi` is the resolution actually rendered (a whole A4 page tops out near 171, and
+`crop` + `zoom` give more detail). It returns a PNG image plus a legend: each box's tag, id, type, label and `box`;
 a text/date field's stored `format` and `font_pt` (the size its value starts at; `font_auto`
 when that follows the box height); a choice's options with their own boxes; a table's cells by
 `(row, col)`, its `orientation` and headers (also printed on the image inside, or beside, the
@@ -144,11 +150,16 @@ with their boxes (fill values still go by column id). `warnings` and `placement_
 always present (`[]` = checked and clean): placement covers every box shown, so a plain preview
 is a read-only placement audit (see the checks under `edit_template`). `crop`
 (`{x, y, w, h}`, fractions) with `zoom` (default 2, max 8) renders just a region, magnified, and
-lists only what it shows; `legend: "changed"` returns only the rows that changed since your last
+lists only what it shows (convert a position read off a crop by proportion: `x = crop.x + crop.w ×
+pixel x / image width`); `legend: "changed"` returns only the rows that changed since your last
 preview of that page (the first time: since fenfill's version), each with only its changed
 options/cells/columns (`members_changed` counts them, so a header edit doesn't list the whole
 grid), plus `removed` ids and `moved_into` (ids that now sit inside a table or group), and
-`legend: "none"` omits the legend. It renders the local working copy (`edit_template`) when there is one, otherwise the saved
+`legend: "none"` omits the legend. `overlay` says what is drawn over the page: `"full"` (the
+default), `"outline"` (the boxes without id tags and table header texts) or `"none"` (nothing:
+the page as a fill stamps it). Use the last two when a tag covers a caption, a tick box or a
+stamped value; `"none"` needs no outlined copy, so it also renders after `check_copy_failed`.
+The legend and `placement_warnings` are the same in all three. It renders the local working copy (`edit_template`) when there is one, otherwise the saved
 template or analyzed version; `edited: true` / `false` in the result says which. The page is rendered on your machine by
 PDFium (WebAssembly, shipped in the package; nothing native is installed), nothing is written to
 disk, and the image goes only to the calling client.
@@ -161,7 +172,10 @@ disk, and the image goes only to the calling client.
   `set_placeholder`, `set_autofill` (a browser autofill token such as `name` or `postal-code`,
   or `null` to clear it);
 - choices and combs: `group` (`kind: "choice" | "comb"`), `ungroup`, `set_options`, and
-  `add_option` / `remove_option`, which keep the group's id;
+  `add_option` / `remove_option`, which keep the group's id; `set_format` on a comb group takes
+  `cell_type` (`char`, `integer` or `date`) and `date_format` (one `D`, `M` or `Y` per cell, e.g.
+  `DDMMYYYY`). Giving a `date_format` makes it a date comb, and `diff_summary.ops` echoes the
+  comb's `cell_type`, `date_format` and `max_length` as a fill will read them;
 - tables: `group` with `kind: "table"` (a `cells` grid of field ids, rows × columns with `null`
   for a gap, or `ids` laid out from their boxes; `header_cols`, `header_rows`, `orientation`,
   `format`), `table_insert` / `table_delete` (a row or column; a new line's geometry is
@@ -172,6 +186,14 @@ disk, and the image goes only to the calling client.
 - order: `reorder {page, ids}` moves those top-level entries together, in that order, to where
   the first of them sat, and stamps an explicit `order` on every entry of the page (the web
   editor's layer-panel convention), so a later sub-pixel move no longer reshuffles questions.
+  `diff_summary.ops` shows the `order` the page is now listed in. fenfill lists each section as
+  one run, standing where its first entry stands, so entries of different sections never stand
+  together whatever their ranks: `reorder` warns, naming the sections, when the ids did not all
+  come out as asked, and rejects such an order when it would change nothing in the listing;
+- sections: `set_section {ids, section_id}` moves fields or groups of one page to another of
+  that page's sections (`null`: out of every section; a group moves with all its members), and
+  `set_section_title {page, section_id, title}` renames one. `get_template` and `analyze_form`
+  show each section's `section_id`.
 
 Any id can be shortened to an unambiguous prefix of 6+ characters (the length of the preview
 tags); an ambiguous prefix is rejected with the candidates. `add`, `move` and `set_box` take an
@@ -182,7 +204,8 @@ box, the box is kept and a warning says so. Snap finds printed rules with its ow
 finder (one ink threshold per page, not the web editor's wand): a very faint rule on a tinted
 scan can be missed, and an underline box is one line of handwriting tall (as tall as the clear
 space above the rule, within about 11–16 pt). `diff_summary.ops` lists every applied op with
-`snapped: true/false` (when it asked for a snap) and `noop: true` when it changed nothing. After
+`snapped: true/false` (when it asked for a snap) and `noop: true` when it changed nothing; a
+batch that leaves the form as it was writes no working copy (`has_edits` stays `false`). After
 each edit, the boxes you touched are checked for three placement problems: a value that would
 print much larger than the page's other fields (an Auto box's text size follows its height), a
 box over printed text (text layer only, so not on scans), and a box that runs a little past the
@@ -192,11 +215,26 @@ Coordinates are fractions of the page (0–1) with a top-left origin, the same a
 `box`. Each op is checked against the rules fenfill applies when saving and is rejected with a
 reason if it breaks them; ops apply in order, all-or-nothing each, except that a box only has to
 lie on the page after the whole batch (so `move` then `resize` works even if the moved box
-overhangs the page in between). `discard: true` drops the working copy. Labels, descriptions,
+overhangs the page in between). `discard: true` drops the working copy (`ops` may then be left
+out). Labels, descriptions,
 placeholders, options, date formats and checkbox symbols are the form's wording, never answers:
 an op whose new wording matches an answer given to `fill_form`, `fill_template` or
 `preview_page` in the same session is rejected before the working copy is written (wording that
-contains an answer of 6+ characters, or equals one of 4–5; equal to a shorter one only warns).
+holds an answer of 6+ characters, or equals one of 4–5; equal to a shorter one only warns). A
+one-word answer is held only as a whole word, so the test value `exempt` does not flag the
+caption `exemption`; an answer of several words, or one without letters (a number, a phone
+number, a date), is caught wherever it occurs. An answer is known as you passed it and as the
+page shows it: a date in its field's printed format (`1990-05-17` as `17.05.1990`), a comb's
+characters without the separators typed between them, an answer of several lines also line by
+line. A date written a third way (`17/05/1990`) is not recognised. The values of a fill or
+preview that failed before the form was read (an output file that already exists, a failed
+download) count as answers too. The reason names the entry and the property (a section with
+its page), never the text. A printed caption can share a word with a test value (`Middle name` after
+previewing `Middle`): when the rejected wording is the form's own, send the op again with
+`confirm_wording: true`. That lets through only wording a rejection has already named (that
+text in that property), and what you confirmed is the wording: it is not asked about again in
+that session, on any entry. Previewing with values that are not words printed on the form
+avoids the round trip.
 Once a PDF is saved as a template, `fill_form` and `preview_page` on it use only that template's
 working copy; an older copy of its unsaved analysis is dropped.
 
@@ -204,12 +242,22 @@ working copy; an older copy of its unsaved analysis is dropped.
 from: if the template changed in fenfill meanwhile, it answers `template_conflict` and keeps your
 local edits. Before anything is sent, it refuses wording that matches an answer given to
 `fill_form`, `fill_template` or `preview_page` in the same session (that list lives only in
-memory). A working copy edited in an earlier session can't be checked against that session's
-answers: `save_template` then answers `confirm_wording_needed` with the changed ids and
-properties (never their text); review them and call again with `confirm_wording: true`. An
+memory): `answer_in_template` lists the matched ids and properties in `matched`, never their
+text (a section comes with its `page`, since section ids repeat from page to page). Fix an
+answer with `edit_template`; when the wording is the form's own, call again with
+`confirm_wording: true`, and the save names what it sent on your confirmation in `warnings`.
+An entry no error has listed yet is refused and listed first, even with the flag set; an entry
+listed for one template is not thereby listed for another. A working
+copy edited in an earlier session can't be checked against that session's answers:
+`save_template` then answers `confirm_wording_needed` with the changed ids and properties (never
+their text); review them and call again with `confirm_wording: true` (the flag on the first
+call gets the list first, too, and so does a copy whose wording changed after the list was
+sent). An
 unsaved analysis can be edited for filling but not saved: to keep corrections,
 analyze with `save_as_template: true` and edit that template. With nothing to save, it succeeds
-with `saved: false, nothing_to_save: true`. `get_template` says `has_local_edits` (its fields
+with `saved: false, nothing_to_save: true`. `get_template` lists the fields in `sections`, in fenfill's order: one
+block per section (with its `section_id` and `title`), and fields in no section as blocks of
+their own where they stand. It says `has_local_edits` (its fields
 are fenfill's saved version; `preview_page` shows the working copy) and gives `field_count`
 (entries listed) and `field_count_total` (the whole form); `save_template`'s `field_count` is
 the whole saved template.
@@ -288,7 +336,8 @@ fenfill web app for that workspace (for example, your logo if you have set one u
   your user) holds form schemas, blank template PDFs, the workspace logo, sha256 hashes of the
   PDFs it produced and `edit_template`'s working copies, **never the answers you fill in**. A
   working copy holds the layout plus the wording the agent wrote with `edit_template`; the echo
-  guard refuses wording that repeats an answer seen in the same session before it is written.
+  guard refuses wording that repeats an answer seen in the same session before it is written,
+  unless the agent, told which property matched, confirms that it is the form's own wording.
 - **Cache cleanup:** at startup and at most once a day it deletes blank PDFs and the logo after
   1 hour, analyses and working copies unused for 90 days, stale job records after 48 hours, and
   output hashes after a year.
@@ -301,28 +350,28 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 
 ## Troubleshooting
 
-| Error                                 | What to do                                                                                                                                                     |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `missing_api_key` / `invalid_api_key` | Set `FENFILL_API_KEY` in the client's config and restart the client.                                                                                           |
-| `plan_required`                       | The workspace needs a paid plan (Pro and up).                                                                                                                  |
-| `insufficient_scans`                  | Not enough page scans left; analyze fewer `pages` or check `get_account`.                                                                                      |
-| `prefilled_form` / `filled_output`    | Only blank forms can be analyzed; use the original, empty PDF. If it is the blank form (some ship with default text in their fields), use the fenfill web app. |
-| `pdf_password_required`               | Remove the open password first; owner-password PDFs work as they are.                                                                                          |
-| `pdf_fill_forbidden`                  | The PDF's author forbids form filling; fenfill won't fill it. Use a copy that allows filling.                                                                  |
-| `not_analyzed`                        | Run `analyze_form` on the same file (and pages) before `fill_form`.                                                                                            |
-| `output_exists`                       | Pick a new `output_path` or pass `overwrite: true`.                                                                                                            |
-| `rate_limited` / `queue_full`         | `analyze_form` already waited about a minute (`waited_s`); try again later.                                                                                    |
-| `too_many_active_jobs`                | Other analyses in the workspace (free native-field ones too) are still running; try again in a minute, or analyze fewer at once.                               |
-| `template_conflict`                   | The template changed in fenfill since your edits began. Your local edits are kept: `edit_template` with `discard: true`, re-apply the ops, save again.         |
-| `invalid_schema`                      | fenfill (or the local check before it) refused the edited layout; `details` lists each item and reason. Fix them with `edit_template`.                         |
-| `check_copy_failed`                   | `preview_page` could not build its outlined copy; `stage` and `id` say where. Fix or remove that field or group with `edit_template`, then preview again.      |
-| `request_too_large`                   | The edited template is too large to save in one request.                                                                                                       |
-| `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent. Put the form's own wording back with `edit_template`.                                 |
-| `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.      |
-| `local_edits_pending`                 | `reanalyze_template` won't run over unsaved edits: `save_template` them first, or pass `discard: true`.                                                        |
-| `kind_required`                       | The pages already have fields: pass `kind` (`find`, `relabel`, `label_missing`, or `scratch` to replace them).                                                 |
-| `job_in_progress`                     | A job is already running on the template; wait and retry (call `reanalyze_template` again with the same arguments if you started it).                          |
-| `upload_outcome_unknown`              | An earlier upload was interrupted. To avoid charging twice, the same file isn't re-uploaded for about 10 minutes; check `get_account` meanwhile.               |
+| Error                                 | What to do                                                                                                                                                                                                                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `missing_api_key` / `invalid_api_key` | Set `FENFILL_API_KEY` in the client's config and restart the client.                                                                                                                                                                                          |
+| `plan_required`                       | The workspace needs a paid plan (Pro and up).                                                                                                                                                                                                                 |
+| `insufficient_scans`                  | Not enough page scans left; analyze fewer `pages` or check `get_account`.                                                                                                                                                                                     |
+| `prefilled_form` / `filled_output`    | Only blank forms can be analyzed; use the original, empty PDF. If it is the blank form (some ship with default text in their fields), use the fenfill web app.                                                                                                |
+| `pdf_password_required`               | Remove the open password first; owner-password PDFs work as they are.                                                                                                                                                                                         |
+| `pdf_fill_forbidden`                  | The PDF's author forbids form filling; fenfill won't fill it. Use a copy that allows filling.                                                                                                                                                                 |
+| `not_analyzed`                        | Run `analyze_form` on the same file (and pages) before `fill_form`.                                                                                                                                                                                           |
+| `output_exists`                       | Pick a new `output_path` or pass `overwrite: true`.                                                                                                                                                                                                           |
+| `rate_limited` / `queue_full`         | `analyze_form` already waited about a minute (`waited_s`); try again later.                                                                                                                                                                                   |
+| `too_many_active_jobs`                | Other analyses in the workspace (free native-field ones too) are still running; try again in a minute, or analyze fewer at once.                                                                                                                              |
+| `template_conflict`                   | The template changed in fenfill since your edits began. Your local edits are kept: `edit_template` with `discard: true`, re-apply the ops, save again.                                                                                                        |
+| `invalid_schema`                      | fenfill (or the local check before it) refused the edited layout; `details` lists each item and reason. Fix them with `edit_template`.                                                                                                                        |
+| `check_copy_failed`                   | `preview_page` could not build its outlined copy; `stage` and `id` say where. Fix or remove that field or group with `edit_template`, then preview again; `overlay: "none"` still shows the page meanwhile.                                                   |
+| `request_too_large`                   | The edited template is too large to save in one request.                                                                                                                                                                                                      |
+| `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent; `matched` lists the ids and properties. An answer: put the form's own wording back with `edit_template`. The form's own wording: `save_template` again with `confirm_wording: true`. |
+| `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.                                                                                                     |
+| `local_edits_pending`                 | `reanalyze_template` won't run over unsaved edits: `save_template` them first, or pass `discard: true`.                                                                                                                                                       |
+| `kind_required`                       | The pages already have fields: pass `kind` (`find`, `relabel`, `label_missing`, or `scratch` to replace them).                                                                                                                                                |
+| `job_in_progress`                     | A job is already running on the template; wait and retry (call `reanalyze_template` again with the same arguments if you started it).                                                                                                                         |
+| `upload_outcome_unknown`              | An earlier upload was interrupted. To avoid charging twice, the same file isn't re-uploaded for about 10 minutes; check `get_account` meanwhile.                                                                                                              |
 
 ## API
 

@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { inflateSync } from "node:zlib";
 
 import { PDFPage } from "pdf-lib";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +19,7 @@ import { applyOps } from "../src/edits.js";
 import { ToolError } from "../src/errors.js";
 import { loadImage, stampAndWrite } from "../src/fill.js";
 import { loadFonts, toArrayBuffer } from "../src/fonts.js";
-import { previewPage } from "../src/preview.js";
+import { PREVIEW_MAX_SIDE_PX, previewPage } from "../src/preview.js";
 import { pageText } from "../src/render.js";
 import type { RenderSchema } from "../src/types.js";
 import { fixture, pdfFor, tmp } from "./helpers.js";
@@ -57,6 +58,21 @@ const checked = async (render: RenderSchema, pdf?: Uint8Array) =>
 const preview = (render: RenderSchema, pdf: Uint8Array, page: number) =>
   previewPage({ pdfBytes: pdf, render, page, values: {}, fonts: loadFonts() });
 
+/** How many colour samples of a preview PNG are not white (render.ts encodePng:
+ *  8-bit RGB, one IDAT, filter 0 on every row). */
+function ink(png: Uint8Array): number {
+  const view = Buffer.from(png);
+  const width = view.readUInt32BE(16);
+  const height = view.readUInt32BE(20);
+  const raw = inflateSync(view.subarray(41, 41 + view.readUInt32BE(33)));
+  const stride = width * 3 + 1;
+  let n = 0;
+  for (let y = 0; y < height; y++) {
+    for (let i = y * stride + 1; i < (y + 1) * stride; i++) if (raw[i] !== 255) n++;
+  }
+  return n;
+}
+
 /** Holds ł ą ę ż ź ć ń ó ś: of the nine, only ó is in WinAnsi. */
 const POLISH = "Zażółć gęślą jaźń";
 const TABLE = "391f4376-9964-5238-bb76-582e8a0772f7";
@@ -83,6 +99,140 @@ describe("check copy banner", () => {
     expect(await page1Has(off.checkPdf!, "fenfill check copy")).toBe(false);
     // Tags are still drawn (the table's group tag, a short id prefix).
     expect(await page1Has(off.checkPdf!, "391f43")).toBe(true);
+  });
+});
+
+describe("preview overlay", () => {
+  /** classic_tables with a row and a column header, as a blank PDF. */
+  const headed = async () => {
+    const r = applyOps(fixture("classic_tables").render, [
+      { op: "set_headers", id: TABLE, axis: "row", texts: ["Alpha"] },
+      { op: "set_headers", id: TABLE, axis: "col", texts: ["Beta"] },
+    ]);
+    expect(r.rejected).toEqual([]);
+    return { render: r.render, pdf: await pdfFor(r.render) };
+  };
+  const shot = (render: RenderSchema, pdf: Uint8Array, overlay?: "full" | "outline" | "none") =>
+    previewPage({
+      pdfBytes: pdf,
+      render,
+      page: 1,
+      values: {},
+      fonts: loadFonts(),
+      dpi: 72,
+      overlay,
+    });
+
+  it('"outline" keeps the boxes and draws no id tag and no table header', async () => {
+    const { render, pdf } = await headed();
+    const run = (checkTags?: boolean) =>
+      fillAgentPdf({
+        pdfBytes: toArrayBuffer(pdf),
+        render,
+        input: {},
+        fonts: loadFonts(),
+        branding: null,
+        logoBytes: null,
+        loadImage,
+        check: true,
+        checkBanner: false,
+        checkTags,
+      });
+    const full = await run();
+    const bare = await run(false);
+    expect(await page1Has(full.checkPdf!, "391f43")).toBe(true);
+    expect(await page1Has(full.checkPdf!, "R: Alpha")).toBe(true);
+    // Nothing is written on the page at all: tags and headers were its only text.
+    expect(await page1Chars(bare.checkPdf!)).toEqual([]);
+    expect(bare.checkError).toBeUndefined();
+    expect(bare.warnings).toEqual(full.warnings);
+
+    const f = await shot(render, pdf, "full");
+    const o = await shot(render, pdf, "outline");
+    expect(ink(o.png)).toBeGreaterThan(0); // the outlines
+    expect(ink(o.png)).toBeLessThan(ink(f.png));
+    expect(o.legend).toEqual(f.legend);
+    expect([o.width, o.height]).toEqual([f.width, f.height]);
+  });
+
+  it('"outline" raises no note for a header the tags would have shown as "?"', async () => {
+    const r = applyOps(fixture("classic_tables").render, [
+      { op: "set_headers", id: TABLE, axis: "col", texts: ["学校 School"] },
+    ]);
+    const pdf = await pdfFor(r.render);
+    expect((await shot(r.render, pdf)).warnings.join(" ")).toMatch(/cannot draw some header/);
+    expect((await shot(r.render, pdf, "outline")).warnings).toEqual([]);
+  });
+
+  it('"none" shows the page as a fill stamps it: no outline, only the values', async () => {
+    const { render, pdf } = await headed();
+    const f = await shot(render, pdf, "full");
+    const n = await shot(render, pdf, "none");
+    expect(ink(f.png)).toBeGreaterThan(0);
+    expect(ink(n.png)).toBe(0); // a blank page, nothing stamped
+    expect(n.legend).toEqual(f.legend);
+    expect([n.width, n.height]).toEqual([f.width, f.height]);
+
+    const cell = "ffb3a3e7-95f1-5573-8140-d59a4a2f666a";
+    const stamped = await previewPage({
+      pdfBytes: pdf,
+      render,
+      page: 1,
+      values: { [TABLE]: { [cell]: "Ann" } },
+      fonts: loadFonts(),
+      dpi: 72,
+      overlay: "none",
+    });
+    expect(stamped.filled).toBe(1);
+    expect(ink(stamped.png)).toBeGreaterThan(0);
+    expect(ink(stamped.png)).toBeLessThan(ink(f.png));
+  });
+
+  it("the default is the full overlay", async () => {
+    const { render, pdf } = await headed();
+    const byDefault = await shot(render, pdf);
+    const full = await shot(render, pdf, "full");
+    expect(Buffer.from(byDefault.png).equals(Buffer.from(full.png))).toBe(true);
+  });
+});
+
+describe("preview size", () => {
+  const a4 = (): RenderSchema => {
+    const { render } = fixture("classic_tables");
+    return { ...render, pages: render.pages.map((p) => ({ ...p, width: 595, height: 842 })) };
+  };
+  const shot = async (extra: Partial<Parameters<typeof previewPage>[0]>) => {
+    const render = a4();
+    return previewPage({
+      pdfBytes: await pdfFor(render),
+      render,
+      page: 1,
+      values: {},
+      fonts: loadFonts(),
+      ...extra,
+    });
+  };
+
+  it("reports the dpi asked for when the image fits", async () => {
+    const plain = await shot({});
+    expect([plain.width, plain.height, plain.dpi]).toEqual([909, 1286, 110]);
+    const crop = await shot({ dpi: 72, crop: { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, zoom: 2.5 });
+    expect(crop.dpi).toBe(180);
+    expect([crop.width, crop.height]).toEqual([744, 1052]);
+  });
+
+  it("caps the longest side and reports the dpi it rendered at, not the one asked", async () => {
+    const page = await shot({ dpi: 200 });
+    expect(page.height).toBe(PREVIEW_MAX_SIDE_PX);
+    expect(page.width).toBe(Math.round((595 * PREVIEW_MAX_SIDE_PX) / 842));
+    expect(page.dpi).toBeCloseTo((PREVIEW_MAX_SIDE_PX / 842) * 72, 1); // about 171, not 200
+    expect(page.dpi).toBeLessThan(200);
+
+    const crop = await shot({ crop: { x: 0, y: 0.1, w: 1, h: 0.25 }, zoom: 8 });
+    expect(crop.width).toBe(PREVIEW_MAX_SIDE_PX);
+    expect(crop.dpi).toBeCloseTo((PREVIEW_MAX_SIDE_PX / 595) * 72, 1); // about 242, not 880
+    // Sizes read off the image still convert: the region is a quarter of the page high.
+    expect(crop.height / crop.width).toBeCloseTo((0.25 * 842) / 595, 2);
   });
 });
 
@@ -255,6 +405,31 @@ describe("a check copy that cannot be built", () => {
       stage: "outline",
       id: first,
     });
+  });
+
+  it('preview_page with overlay "none" needs no check copy, so it still renders', async () => {
+    const pdf = await pdfFor(render);
+    breakOutlines();
+    const pv = await previewPage({
+      pdfBytes: pdf,
+      render,
+      page: 1,
+      values: {},
+      fonts: loadFonts(),
+      overlay: "none",
+    });
+    expect(isPng(pv.png)).toBe(true);
+    expect(pv.legend.length).toBeGreaterThan(0);
+    await expect(
+      previewPage({
+        pdfBytes: pdf,
+        render,
+        page: 1,
+        values: {},
+        fonts: loadFonts(),
+        overlay: "outline",
+      }),
+    ).rejects.toMatchObject({ code: "check_copy_failed" });
   });
 
   it("a fill still writes its output, leaves check_path out and says why", async () => {

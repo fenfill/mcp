@@ -9,8 +9,10 @@
 // so they never read the key and never open a socket. edit_template keeps its
 // working copy on this machine; only save_template sends it (layout and the
 // form's wording). The echo guard rejects an edit whose wording repeats an
-// answer of this session before the copy is written; wording a copy got from
-// an earlier process needs save_template's confirm_wording.
+// answer of this session before the copy is written, and save_template refuses
+// such wording again; the agent is told which property matched and can then
+// confirm it as the form's own (confirm_wording). Wording a copy got from an
+// earlier process needs save_template's confirm_wording too.
 
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleepTimer } from "node:timers/promises";
@@ -57,17 +59,33 @@ import {
 import { loadFonts, toArrayBuffer } from "./fonts.js";
 import { log } from "./log.js";
 import { EchoGuard } from "./echo.js";
-import { applyOps, changedWording, MAX_OPS, type Snapper, wordingChanges } from "./edits.js";
+import {
+  applyOps,
+  changedWording,
+  describeWording,
+  MAX_OPS,
+  type Snapper,
+  wordingChanges,
+} from "./edits.js";
 import { mergeAnalyses, soleTemplateId } from "./merge.js";
 import { parsePageSpec } from "./pages.js";
 import { placementWarnings, stampedSizes } from "./placement.js";
-import { legendChanges, legendPrints, legendRows, MAX_ZOOM, previewPage } from "./preview.js";
+import {
+  legendChanges,
+  legendPrints,
+  legendRows,
+  MAX_ZOOM,
+  OVERLAYS,
+  PREVIEW_MAX_SIDE_PX,
+  previewPage,
+} from "./preview.js";
 import { analyzedPagesOf, RERUN_KINDS, reanalyzeTemplate } from "./reanalyze.js";
 import { DEFAULT_DPI, MAX_DPI } from "./render.js";
 import { pageOfId, prepareSnapper, snapPages } from "./snap.js";
 import { SWEEP_INTERVAL_MS, sweepCache } from "./sweep.js";
 import type { Account, AgentSchema, RenderSchema, TemplateUpdated } from "./types.js";
 import { schemaIssues } from "./validate.js";
+import { expandValueKeys } from "./values.js";
 import { VERSION } from "./version.js";
 
 export interface ServerOptions {
@@ -127,7 +145,11 @@ const PAGES = z
   .max(2000)
   .optional()
   .describe('1-based pages, e.g. "1-3,5". Omit for all.');
-const VALUES = z.record(z.string(), z.unknown()).describe("Field id → value (see description).");
+const VALUES = z
+  .record(z.string(), z.unknown())
+  .describe(
+    "Field id → value (see description). An id may be shortened to an unambiguous prefix of 6+ characters (the preview tags), a table's cell or column id inside its value too; a key that matches nothing is listed in skipped.",
+  );
 const OUTPUT_PATH = z
   .string()
   .min(1)
@@ -204,7 +226,14 @@ async function refreshSavedAnalyses(
       await cache
         .saveAnalysis({
           ...e,
-          render: { ...render, pages: e.render.pages },
+          // The cached pages keep their own images; the sections are the saved ones.
+          render: {
+            ...render,
+            pages: e.render.pages.map((p) => {
+              const saved = render.pages.find((x) => x.page === p.page);
+              return saved?.sections !== undefined ? { ...p, sections: saved.sections } : p;
+            }),
+          },
           agent: { ...agent, template_id: templateId, updated_at: saved.updated_at },
         })
         .catch(() => undefined);
@@ -278,6 +307,30 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
   // Free-text answers seen this session, for save_template's echo guard.
   // In memory only (echo.ts).
   const echo = new EchoGuard();
+  /** The `values` arguments `taken` has seen (by identity, per call). */
+  const takenInputs = new WeakSet<object>();
+  /** A call's fill values as the stamping core takes them (short ids written
+   *  out in full: values.ts), remembered by the echo guard on the way. */
+  const taken = (render: RenderSchema, values: Record<string, unknown>) => {
+    takenInputs.add(values);
+    const answers = expandValueKeys(render, values);
+    echo.remember(render, answers);
+    return answers;
+  };
+  /** For a failed call. One that fails before `taken` (no form read yet: a
+   *  refused output path, a request that failed) leaves its values unseen;
+   *  they are remembered here whatever they were meant for, because the agent
+   *  has typed them and may write one into a label next. */
+  const untaken = (args: unknown) => {
+    const given = (args as { values?: unknown } | null)?.values;
+    if (typeof given !== "object" || given === null || Array.isArray(given)) return;
+    if (!takenInputs.has(given)) echo.rememberUnread(given as Record<string, unknown>);
+  };
+  /** The list of foreign wording changes save_template last sent the agent,
+   *  per working copy: a digest of exactly that wording (entries, properties
+   *  and text; in memory only). Only the list it was sent can be confirmed, so
+   *  a copy whose wording has changed since is listed again first. */
+  const listedForeign = new Map<string, string>();
 
   /** preview_page legend fingerprints by target + page, for legend: "changed" (this process only). */
   const lastLegend = new Map<string, Map<string, string>>();
@@ -385,6 +438,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         log("info", "tool ok", { tool: name, ms: Date.now() - t0 });
         return ok(result);
       } catch (e) {
+        untaken(args);
         const err = asToolError(e);
         log("warn", "tool failed", { tool: name, code: err.code, ms: Date.now() - t0 });
         return fail(err);
@@ -509,11 +563,11 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
       const templateId = soleTemplateId(merged, null, await identity(false));
       const wc = await fileEdits({ sha, templateId });
       const render = wc ? wc.render : merged.render;
-      echo.remember(render, values);
+      const answers = taken(render, values);
       const res = await stampAndWrite({
         pdfBytes: bytes,
         render,
-        agentInput: values,
+        agentInput: answers,
         fonts: loadFonts(opts.fontsDir),
         branding: null,
         logoBytes: null,
@@ -573,7 +627,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           }
           render = tpl.render;
         }
-        echo.remember(render, values);
+        const answers = taken(render, values);
         const { body: account } = await client.getJson<Account>("/account", { signal, deadline });
 
         const blank = await templateBlank(template_id, signal, deadline);
@@ -593,7 +647,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         const res = await stampAndWrite({
           pdfBytes: blank,
           render,
-          agentInput: values,
+          agentInput: answers,
           fonts: loadFonts(opts.fontsDir),
           branding,
           logoBytes: logo ? toArrayBuffer(logo) : null,
@@ -744,19 +798,23 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "preview_page",
     {
       title: "Preview a page with its field boxes",
-      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin, as edit_template uses), format and font_pt; options, table cells (row, col) and table_rows columns with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: much larger text than the page's other fields, a box over printed text (not on scans), a box past its ruled cell. Use it as a read-only placement audit. values (see that parameter) stamp test values. crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now inside a table or group). It renders the local working copy (edit_template) when one exists, else the saved or analyzed version (edited: true/false). Rendered on this machine: nothing is written to disk and the values are never sent anywhere.`,
+      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin, as edit_template uses), format and font_pt; options, table cells (row, col) and table_rows columns with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: much larger text than the page's other fields, a box over printed text (not on scans), a box past its ruled cell. Use it as a read-only placement audit. values (see that parameter) stamp test values. overlay: "outline" drops the tags, "none" shows the page with only the stamped values (to read print under a tag, or after check_copy_failed). crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now inside a table or group). It renders the local working copy (edit_template) when one exists, else the saved or analyzed version (edited: true/false). Rendered on this machine: nothing is written to disk and the values are never sent anywhere.`,
       inputSchema: {
         path: TARGET_PATH,
         template_id: TARGET_TEMPLATE,
         page: z.number().int().min(1).max(100_000).describe("1-based page number."),
-        values: VALUES.optional().describe(`Optional, exactly as for fill_form: ${VALUE_SHAPES}`),
+        values: VALUES.optional().describe(
+          `Optional, exactly as for fill_form (ids may be shortened the same way): ${VALUE_SHAPES} Test values count as answers for the wording check of edit_template and save_template: prefer ones that are not words printed on the form (a caption that repeats one has to be confirmed there).`,
+        ),
         dpi: z
           .number()
           .int()
           .min(36)
           .max(MAX_DPI)
           .optional()
-          .describe(`Resolution (default ${String(DEFAULT_DPI)}, max ${String(MAX_DPI)}).`),
+          .describe(
+            `Resolution (default ${String(DEFAULT_DPI)}, max ${String(MAX_DPI)}). The image's longest side is capped at ${String(PREVIEW_MAX_SIDE_PX)} px; the result's dpi is what was rendered (use crop + zoom for more detail).`,
+          ),
         crop: z
           .object({
             x: z.number().min(0).max(1),
@@ -766,7 +824,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           })
           .optional()
           .describe(
-            "Optional: render only this region of the page (fractions, top-left origin, like the legend boxes), magnified by zoom. The legend then lists only what the region shows.",
+            "Optional: render only this region of the page (fractions, top-left origin, like the legend boxes), magnified by zoom. The legend then lists only what the region shows. Convert a position read off the image by proportion (x = crop.x + crop.w × pixel x / image width, the same for y), not by pixel count: a client may show the image smaller than width × height.",
           ),
         zoom: z
           .number()
@@ -779,6 +837,12 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .optional()
           .describe(
             'Which legend rows to return: "all" (default), "changed" (only what changed since your last preview of this page, or, the first time, since fenfill\'s version; plus removed ids), or "none".',
+          ),
+        overlay: z
+          .enum(OVERLAYS)
+          .optional()
+          .describe(
+            'What is drawn over the page: "full" (default) = every box outlined and tagged, table headers printed; "outline" = the boxes only, no id tags and no table header texts; "none" = nothing, the page as a fill stamps it. Use "outline" or "none" when a tag covers a caption, a tick box or a stamped value. The legend and placement_warnings are the same in all three.',
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -808,16 +872,17 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           render = wc ? wc.render : (await fetchTemplate(id, signal)).render;
           bytes = await templateBlank(id, signal);
         }
-        echo.remember(render, values);
+        const answers = taken(render, values);
         const pv = await previewPage({
           pdfBytes: bytes,
           render,
           page: args.page,
-          values,
+          values: answers,
           dpi: args.dpi,
           fonts: loadFonts(opts.fontsDir),
           crop: args.crop,
           zoom: args.zoom,
+          overlay: args.overlay,
         });
         // Placement over every box the page (or crop) shows: a gold review
         // must see a box sitting on a printed hint before it edits anything.
@@ -858,8 +923,19 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
                 edited: false,
                 source: args.path ? "analysis (no local edits)" : "saved template (no local edits)",
               }),
-          colours:
-            "green = filled, orange = filled with a warning, red = skipped, grey dashed = empty; a radio/multiselect option has a thin box tagged below it",
+          // The colour key of what is drawn: nothing with overlay "none".
+          ...(args.overlay === "none"
+            ? { overlay: "none" }
+            : args.overlay === "outline"
+              ? {
+                  overlay: "outline",
+                  colours:
+                    "green = filled, orange = filled with a warning, red = skipped, grey dashed = empty; a radio/multiselect option has a thin box",
+                }
+              : {
+                  colours:
+                    "green = filled, orange = filled with a warning, red = skipped, grey dashed = empty; a radio/multiselect option has a thin box tagged below it",
+                }),
           ...(args.crop ? { crop: args.crop } : {}),
           ...(mode === "none"
             ? {}
@@ -885,6 +961,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           ],
         };
       } catch (e) {
+        untaken(args);
         const err = asToolError(e);
         log("warn", "tool failed", { tool: "preview_page", code: err.code, ms: Date.now() - t0 });
         return fail(err);
@@ -904,13 +981,22 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         ops: z
           .array(z.record(z.string(), z.unknown()))
           .max(MAX_OPS)
+          .optional()
           .describe(
-            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type, date_format with one D/M/Y letter per cell); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where the first sat (stamps order; geometry no longer decides). Every cell of one column (or row, when orientation is row) has one type.`,
+            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type char|integer|date, or date_format with one D/M/Y letter per cell, e.g. DDMMYYYY, which makes it a date comb; diff_summary.ops shows the comb's cell_type, date_format and max_length); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where the first sat (stamps order; geometry no longer decides); diff_summary.ops shows the order now listed. A section is listed as one run where its first entry stands, so entries of different sections never stand together: set_section {ids, section_id | null} moves fields or groups of one page to another of its sections (get_template shows each section's section_id; null = no section), and set_section_title {page, section_id, title} renames one. A reorder whose ids cannot come out as asked and that would change nothing in the listing is rejected. Every cell of one column (or row, when orientation is row) has one type.`,
           ),
         discard: z
           .boolean()
           .optional()
-          .describe("Drop the local working copy first (any ops then apply to fenfill's version)."),
+          .describe(
+            "Drop the local working copy first (any ops then apply to fenfill's version). ops may be left out with it.",
+          ),
+        confirm_wording: z
+          .boolean()
+          .optional()
+          .describe(
+            "Only after an op was rejected because its wording matches an answer of this session: true confirms the rejected wording is the form's own printed text, not an answer, so the same op applies. It covers only wording a rejection has already named (that text in that property); new wording is rejected and named first.",
+          ),
       },
       annotations: {
         readOnlyHint: false,
@@ -919,8 +1005,15 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         openWorldHint: true,
       },
     },
-    run("edit_template", async ({ path, template_id, ops, discard }, _extra, signal) => {
+    run("edit_template", async (args, _extra, signal) => {
+      const { path, template_id, ops: given, discard, confirm_wording } = args;
       oneTarget({ path, template_id });
+      if (given === undefined && discard !== true) {
+        throw new ToolError("invalid_argument", "Pass ops, or discard: true (or both).", {
+          hint: "ops: the edits to apply ([] only reports whether local edits exist); discard: true drops the local working copy.",
+        });
+      }
+      const ops = given ?? [];
       const who = await identity(false);
       let key: string;
       let saveTarget: string | null;
@@ -958,6 +1051,9 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
       if (discard === true) discarded = await cache.deleteEdits(key);
       let wc = await cache.readEdits(key);
       if (wc && saveTarget && !sameAccount(wc, who)) wc = null; // another account's copy
+      // Whether this account had local edits before the call (another account's
+      // copy on disk is not one, and a new copy replaces it).
+      const had = wc !== null;
       const nowIso = new Date(now()).toISOString();
       if (!wc && ops.length === 0) {
         return {
@@ -1005,8 +1101,12 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         }
       }
       // The echo guard runs per op, before anything is written: an op whose
-      // wording repeats an answer of this session is rejected.
-      const r = applyOps(wc.render, ops, (w) => echo.check(w), { snap });
+      // wording repeats an answer of this session is rejected, unless a
+      // rejection has named that match before and the agent now confirms it.
+      const r = applyOps(wc.render, ops, (w) => echo.check(w, key), {
+        snap,
+        confirmWording: confirm_wording === true,
+      });
       let placement: string[] = [];
       if (r.applied > 0) {
         const ids = [
@@ -1030,15 +1130,21 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         writer,
         ...(inherited ? { inherited_wording: true as const } : {}),
       };
-      const existed = (await cache.readEdits(key)) !== null;
-      if (r.applied > 0) {
+      // A batch that leaves the schema as it was (every op a noop, or ops that
+      // undo each other) writes nothing, so no working copy appears for it.
+      const changed = r.applied > 0 && JSON.stringify(r.render) !== JSON.stringify(wc.render);
+      if (changed) {
         await cache.writeEdits(out);
         // A new template copy supersedes its PDF's own (unsaved-analysis) copy.
-        if (saveTarget && !existed) {
+        if (saveTarget && !had) {
           await dropFileCopies(saveTarget, fileSha).catch(() => undefined);
         }
       }
-      const hasEdits = r.applied > 0 || existed;
+      // `rejected` tells the agent which wording matched, so from the next call
+      // on it can confirm it; what it confirmed here is not asked about again.
+      echo.tell(r.screened.told);
+      echo.confirm(r.screened.confirmed);
+      const hasEdits = changed || had;
       const left = hasEdits ? schemaIssues(out.render, 10) : [];
       return {
         target: saveTarget ? { template_id: saveTarget } : { path },
@@ -1055,7 +1161,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           ),
         ],
         has_edits: hasEdits,
-        ops_applied_total: out.ops_applied,
+        ops_applied_total: changed ? out.ops_applied : wc.ops_applied,
         saveable: !!saveTarget,
         next: saveTarget
           ? "Check with preview_page (or fill_form with check_pdf), then save_template to keep the edits in the saved template."
@@ -1070,14 +1176,14 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     {
       title: "Save local edits to a template",
       description:
-        "Save edit_template's local working copy of a saved template to fenfill (only the layout and the form's wording are sent; never fill values). Fails safely if the template changed in fenfill since the edits began (template_conflict: the local edits are kept; discard and re-apply them), and refuses wording that repeats an answer given to fill_form / fill_template / preview_page in this session (answers never go into a template). Wording edited in an earlier session can't be checked that way: save_template then answers confirm_wording_needed with the changed ids and properties; review that wording (preview_page shows labels) and call again with confirm_wording: true. An unsaved analysis can't be saved: analyze it again with save_as_template: true (free on a native-field PDF; otherwise it costs scans again), then edit that template.",
+        "Save edit_template's local working copy of a saved template to fenfill (only the layout and the form's wording are sent; never fill values). Fails safely if the template changed in fenfill since the edits began (template_conflict: the local edits are kept; discard and re-apply them), and refuses wording that repeats an answer given to fill_form / fill_template / preview_page in this session (answers never go into a template): answer_in_template lists the matched ids and properties. An answer: fix it with edit_template. The form's own wording (a caption that shares a word with a test value): call again with confirm_wording: true. Wording edited in an earlier session can't be checked that way: save_template then answers confirm_wording_needed with the changed ids and properties; review that wording (preview_page shows labels) and call again with confirm_wording: true. An unsaved analysis can't be saved: analyze it again with save_as_template: true (free on a native-field PDF; otherwise it costs scans again), then edit that template.",
       inputSchema: {
         template_id: TEMPLATE_ID,
         confirm_wording: z
           .boolean()
           .optional()
           .describe(
-            "Only after a confirm_wording_needed error: true confirms you reviewed the listed wording (edited in an earlier session) and it is the form's own text, not an answer.",
+            "Only after an answer_in_template or confirm_wording_needed error: true confirms you compared the listed wording with the printed form and it is the form's own text, not an answer. An entry no error has listed yet is refused and listed first, on a copy from an earlier session too.",
           ),
       },
       annotations: {
@@ -1099,22 +1205,40 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         };
       }
 
-      // 1. The echo guard: wording that repeats an answer never leaves.
+      // 1. The echo guard: wording that repeats an answer never leaves, unless
+      // the agent has been told which wording matched and confirms it is the
+      // form's own. A match it has not been told about is listed first, even
+      // when the flag is already set.
       const changed = changedWording(wc.base, wc.render);
-      const echoed = echo.check(changed);
-      if (echoed.refuse.length) {
+      const echoed = echo.check(changed, wc.key);
+      // Wording an earlier process wrote: this session's guard can't vouch for it.
+      const foreign = wc.writer?.owner !== owner || wc.inherited_wording === true;
+      // What a foreign copy changed: the list of it (shown as ids and
+      // properties) must have been sent before it can be confirmed, and it is
+      // that wording the agent then vouches for, so the digest takes the text.
+      const listing = sha256Hex(JSON.stringify(changed));
+      const unvouched = foreign && changed.length > 0;
+      // At the save every entry has its id: each one that matches must itself
+      // have been named by a refusal before the flag covers it.
+      const confirmable = confirm_wording === true && echoed.refused.every((x) => x.listed);
+      if (echoed.refused.length && !confirmable) {
+        echo.tell(echoed.refused);
+        if (unvouched) listedForeign.set(wc.key, listing);
         throw new ToolError(
           "answer_in_template",
-          "Some edited wording matches an answer you filled in this session, so it was not sent.",
+          "Some edited wording matches an answer you filled or previewed in this session, so it was not sent.",
           {
-            hint: "Labels, descriptions, placeholders and options hold the form's own wording, never an answer. Fix those items with edit_template (relabel / set_description / set_placeholder / set_options), then save again.",
-            details: { ids: echoed.refuse },
+            hint: "Compare each property listed in `matched` with the printed form (preview_page's legend shows the wording). An answer: put the form's own wording back with edit_template (relabel / set_description / set_placeholder / set_options / set_section_title). The form's own text: call save_template again with confirm_wording: true.",
+            details: {
+              ids: echoed.refuse,
+              matched: wordingChanges(echoed.refused),
+              ...(unvouched ? { changed: wordingChanges(changed) } : {}),
+            },
           },
         );
       }
-      // Wording an earlier process wrote: this session's guard can't vouch for it.
-      const foreign = wc.writer?.owner !== owner || wc.inherited_wording === true;
-      if (foreign && changed.length && confirm_wording !== true) {
+      if (unvouched && !(confirm_wording === true && listedForeign.get(wc.key) === listing)) {
+        listedForeign.set(wc.key, listing);
         throw new ToolError(
           "confirm_wording_needed",
           "This working copy has wording edited in an earlier session, which this session's answer check can't cover, so it was not sent.",
@@ -1147,8 +1271,18 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         );
       }
 
-      // 3. One conditional PATCH (sent once; page images stay as received).
-      const schema = { ...wc.render, pages: wc.base.pages };
+      // 3. One conditional PATCH (sent once). Pages go back as received (their
+      // images and sizes are the server's), each with the working copy's
+      // sections: a section's title is the form's wording, and an op edits it.
+      const schema = {
+        ...wc.render,
+        pages: wc.base.pages.map((p, i) => {
+          const edited = wc.render.pages[i];
+          return edited?.page === p.page && edited.sections !== undefined
+            ? { ...p, sections: edited.sections }
+            : p;
+        }),
+      };
       let saved: TemplateUpdated;
       try {
         saved = await api().patchJson<TemplateUpdated>(
@@ -1194,6 +1328,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
       // 4. Saved: the server copy is now the edited one (and any unsaved-analysis
       // copy of its PDF is stale).
       await cache.deleteEdits(wc.key);
+      listedForeign.delete(wc.key); // a later copy's wording is listed afresh
       await dropFileCopies(template_id, wc.sha256).catch(() => undefined);
       await refreshSavedAnalyses(cache, template_id, schema, saved, await identity(false));
       return {
@@ -1211,13 +1346,24 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
             return {};
           }
         })(),
-        ...(echoed.warn.length
-          ? {
-              warnings: [
-                `${echoed.warn.join(", ")}: short wording that matches a short answer from this session (allowed under 4 characters); check it is the form's own text`,
-              ],
-            }
-          : {}),
+        ...(() => {
+          // Wording that matched an answer and went out on the agent's word,
+          // confirmed at an edit or just now: named once more, by id and property.
+          const vouched = [...echoed.confirmed, ...echoed.refused];
+          const warnings = [
+            ...(vouched.length
+              ? [
+                  `${describeWording(vouched)}: matches an answer filled in this session; saved because you confirmed it is the form's own wording`,
+                ]
+              : []),
+            ...(echoed.warn.length
+              ? [
+                  `${echoed.warn.join(", ")}: short wording that matches a short answer from this session (allowed under 4 characters); check it is the form's own text`,
+                ]
+              : []),
+          ];
+          return warnings.length ? { warnings } : {};
+        })(),
         next: "fill_template, get_template and recipient links now use the saved layout.",
       };
     }),

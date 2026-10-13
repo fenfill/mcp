@@ -54,6 +54,34 @@ describe("applyOps", () => {
     expect(cells[1].w).toBeCloseTo(5);
   });
 
+  it("set_format {date_format} on a comb makes it a date comb and echoes what a fill reads", () => {
+    const s = canon();
+    const g = group(s, "g-comb") as Record<string, unknown>;
+    g.cell_type = "char";
+    delete g.date_format;
+    const r = applyOps(s, [
+      { op: "set_format", id: "g-comb", format: { cell_type: "integer" } },
+      { op: "set_format", id: "g-comb", format: { date_format: "DDMM" } },
+      { op: "set_format", id: "g-comb", format: { cell_type: "char", date_format: "MMDD" } },
+    ]);
+    expect(r.rejected).toEqual([
+      { op_index: 2, reason: expect.stringMatching(/date_format needs cell_type "date"/) },
+    ]);
+    expect(r.diff_summary.ops).toEqual([
+      {
+        op_index: 0,
+        op: "set_format",
+        comb: { cell_type: "integer", date_format: null, max_length: 4 },
+      },
+      {
+        op_index: 1,
+        op: "set_format",
+        comb: { cell_type: "date", date_format: "DDMM", max_length: 4 },
+      },
+    ]);
+    expect(group(r.render, "g-comb")).toMatchObject({ cell_type: "date", date_format: "DDMM" });
+  });
+
   it("relabel, retype, set_required/description/placeholder, set_format", () => {
     const r = applyOps(canon(), [
       { op: "relabel", id: "f-text", label: "  Total  " },
@@ -337,6 +365,196 @@ describe("EchoGuard", () => {
     expect(
       applyOps(canon(), [{ op: "relabel", id: "f-text", label: "Jan Kowalski" }]).applied,
     ).toBe(1);
+  });
+
+  it("a one-word answer counts only as a whole word; several words or a number wherever they occur", () => {
+    const g = new EchoGuard();
+    const answers = [
+      "exempt",
+      "AB1234",
+      "Line 1",
+      "Jan Kowalski",
+      "12345678",
+      "600123456",
+      "(555) 123-4567",
+      "山田太郎さん",
+    ];
+    for (const v of answers) g.remember(canon(), { "f-text": v });
+    const cases: [string, boolean][] = [
+      // One word: caught as a whole word only.
+      ["Exemption from FATCA reporting", false],
+      ["exempts", false], // an inflected form of one word is the price of the rule
+      ["Exempt payee code", true],
+      ["Exemptions; or exempt status", true], // a later occurrence is the word
+      ["XAB12345", false],
+      ["Ref AB1234", true],
+      // Several words: wherever they occur.
+      ["Address (line 1)", true],
+      ["Line 10", true],
+      ["Jan Kowalskiego", true],
+      // No letters (a number, a phone number): wherever they occur.
+      ["ID12345678", true],
+      ["912345678", true],
+      ["+48600123456", true],
+      ["Phone: (555) 123-4567", true],
+      // A script without case has no word runs.
+      ["氏名山田太郎さん様", true],
+    ];
+    const res = g.check(cases.map(([text], i) => ({ id: String(i), prop: "label", text })));
+    expect(res.refuse).toEqual(cases.flatMap(([, hit], i) => (hit ? [String(i)] : [])));
+    expect(res.warn).toEqual([]);
+  });
+
+  it("names the property that matched, and lets through only wording it was told about and confirmed", () => {
+    const g = new EchoGuard();
+    g.remember(canon(), { "f-text": "Middle" });
+    const wording = [
+      { id: "a", prop: "label", text: "Middle name" },
+      { id: "a", prop: "description", text: "As printed in the passport" },
+    ];
+    const first = g.check(wording);
+    expect(first.refuse).toEqual(["a"]);
+    expect(first.refused).toEqual([
+      { id: "a", prop: "label", text: "Middle name", shown: false, listed: false },
+    ]);
+    g.tell(first.refused);
+    // Told: the wording is known wherever it stands, the entry only where it was named.
+    const told = g.check([...wording, { id: "b", prop: "label", text: "Middle name" }]);
+    expect(told.refused.map((r) => [r.id, r.shown, r.listed])).toEqual([
+      ["a", true, true],
+      ["b", true, false],
+    ]);
+    g.confirm(first.refused);
+    const after = g.check([
+      ...wording,
+      { id: "b", prop: "label", text: " middle  NAME " }, // the same wording on another entry
+      { id: "b", prop: "placeholder", text: "Middle name" }, // another property: not vouched
+    ]);
+    expect(after.confirmed.map((r) => `${r.id}:${r.prop}`)).toEqual(["a:label", "b:label"]);
+    expect(after.refused.map((r) => `${r.id}:${r.prop}`)).toEqual(["b:placeholder"]);
+    expect(after.refuse).toEqual(["b"]);
+  });
+
+  it("remembers an answer as the page shows it too: a date in its format, a comb without its separators", () => {
+    const s = canon();
+    field(s, "f-date").format = { date_format: "DD.MM.YYYY" };
+    group(s, "g-comb").date_format = "DD.MM";
+    const g = new EchoGuard();
+    g.remember(s, { "f-date": "1990-05-17", "g-comb": "17-05" });
+    const res = g.check([
+      { id: "a", text: "1990-05-17" }, // the date as passed
+      { id: "b", text: "Born 17.05.1990 in" }, // … as its field prints it
+      { id: "c", text: "1705" }, // the comb's cells, as stamped
+      { id: "d", text: "17.05" }, // … with the separators its format prints
+      { id: "e", text: "17/05/1990" }, // written a third way: not known to the guard
+    ]);
+    expect(res.refuse.sort()).toEqual(["a", "b", "c", "d"]);
+    expect(res.warn).toEqual([]);
+  });
+
+  it("compares text in NFC, and takes an answer of several lines line by line", () => {
+    const name = "Zażółć Gęślą";
+    const g = new EchoGuard();
+    g.remember(canon(), { "f-text": name.normalize("NFD") });
+    expect(name.normalize("NFD")).not.toBe(name.normalize("NFC"));
+    expect(g.check([{ id: "a", text: name.normalize("NFC") }]).refuse).toEqual(["a"]);
+
+    const lines = new EchoGuard();
+    lines.remember(canon(), { "f-text": "ul. Długa 5\n00-001 Warszawa\nPL" });
+    const res = lines.check([
+      { id: "a", text: "ul. Długa 5" }, // one line of it
+      { id: "b", text: "e.g. 00-001 Warszawa" }, // a line inside longer wording
+      { id: "c", text: "PL" }, // a line under 4 characters is not taken on its own
+    ]);
+    expect(res.refuse.sort()).toEqual(["a", "b"]);
+    expect(res.warn).toEqual([]);
+  });
+
+  it("remembers every text of a call that failed before its form was read, from 4 characters", () => {
+    const g = new EchoGuard();
+    g.rememberUnread({ a: "Jan Kowalski", b: { c: ["600 123 456", true, 7] }, d: "yes" });
+    const res = g.check([
+      { id: "a", text: "Mr Jan Kowalski" },
+      { id: "b", text: "Tel. 600 123 456" },
+      { id: "c", text: "Yes" },
+      { id: "d", text: "7" },
+    ]);
+    expect(res.refuse.sort()).toEqual(["a", "b"]);
+    expect(res.warn).toEqual([]);
+  });
+
+  it("an entry is named within its working copy, and a section by its page", () => {
+    const g = new EchoGuard();
+    g.remember(canon(), { "f-text": "Middle" });
+    const title = (page: number) => ({ id: "s1", page, prop: "title", text: "Middle name" });
+    const first = g.check([title(1)], "t-one");
+    expect(first.refused).toEqual([{ ...title(1), shown: false, listed: false, scope: "t-one" }]);
+    g.tell(first.refused);
+    const flags = (page: number, scope: string) =>
+      g.check([title(page)], scope).refused.map((r) => [r.shown, r.listed]);
+    expect(flags(1, "t-one")).toEqual([[true, true]]);
+    expect(flags(2, "t-one")).toEqual([[true, false]]); // the same id on another page
+    expect(flags(1, "t-two")).toEqual([[true, false]]); // the same id in another template
+  });
+
+  it("applyOps: confirmWording applies a refusal the agent was told about, never one it has not seen", () => {
+    const g = new EchoGuard();
+    g.remember(canon(), { "f-text": "Middle" });
+    const ops = [
+      { op: "relabel", id: "f-signature", label: "Middle name" },
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.1, y: 0.8, w: 0.2, h: 0.03 },
+        label: "Middle initial",
+        description: "One letter",
+      },
+    ];
+    const screen = (w: Parameters<EchoGuard["check"]>[0]) => g.check(w);
+    // The flag ahead of any refusal confirms nothing.
+    const blind = applyOps(canon(), ops, screen, { confirmWording: true });
+    expect(blind.applied).toBe(0);
+    expect(blind.rejected.map((x) => x.op_index)).toEqual([0, 1]);
+    expect(blind.rejected[0].reason).toMatch(
+      /^the label of f-signature matches an answer filled in this session\..*confirm_wording: true/,
+    );
+    // Only the matching property is named (the added field's description is fine).
+    // …and the field the op would have made is named as that: its id is never seen.
+    expect(blind.rejected[1].reason).toMatch(/^the label of the new entry matches/);
+    expect(JSON.stringify([blind.rejected, blind.warnings])).not.toMatch(/middle/i);
+    expect(blind.screened.told.map((r) => r.prop)).toEqual(["label", "label"]);
+    expect(blind.screened.confirmed).toEqual([]);
+
+    g.tell(blind.screened.told);
+    const plain = applyOps(canon(), ops, screen);
+    expect(plain.applied).toBe(0); // told, but not confirmed
+    const ok = applyOps(canon(), ops, screen, { confirmWording: true });
+    expect(ok.rejected).toEqual([]);
+    expect(ok.applied).toBe(2);
+    expect(ok.warnings[0]).toMatch(
+      /^the label of f-signature: matches an answer filled in this session; applied because confirm_wording/,
+    );
+    expect(ok.warnings.join(" ")).not.toMatch(/middle/i);
+    expect(ok.screened.confirmed).toHaveLength(2);
+    expect(field(ok.render, "f-signature").label).toBe("Middle name");
+
+    // Confirmed wording is not asked about again; other matching wording still is.
+    g.confirm(ok.screened.confirmed);
+    const later = applyOps(canon(), [
+      { op: "relabel", id: "f-date", label: "Middle name" },
+      { op: "relabel", id: "f-text", label: "Middle school" },
+    ]);
+    expect(later.applied).toBe(2); // no screen: nothing checked
+    const screened = applyOps(
+      canon(),
+      [
+        { op: "relabel", id: "f-date", label: "Middle name" },
+        { op: "relabel", id: "f-text", label: "Middle school" },
+      ],
+      screen,
+    );
+    expect(screened.rejected.map((x) => x.op_index)).toEqual([1]);
   });
 
   it("changedWording reports id + property of new or changed text", () => {

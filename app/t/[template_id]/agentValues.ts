@@ -1137,9 +1137,10 @@ class CheckCopyError extends Error {
  * The check copy of a filled PDF: every agent entry's box outlined in its
  * status colour and tagged with a short id prefix (radio options too; table
  * cells get a thin untagged outline, their tags are in preview_page's legend),
- * plus a legend line on page 1 unless `banner` is false. Built from the
- * stamped bytes, so it shows exactly what the output holds. Local only, like
- * the output itself.
+ * plus a legend line on page 1 unless `banner` is false. With `tags` false
+ * only the outlines are drawn: no id tags and no table header texts, so
+ * nothing covers the print beside a box. Built from the stamped bytes, so it
+ * shows exactly what the output holds. Local only, like the output itself.
  *
  * `notes` say what it could not draw as written (a table header, in the
  * warnings' `<id>: …` form). A failure is thrown as a CheckCopyError naming the
@@ -1151,10 +1152,11 @@ async function buildCheckPdf(
   status: (id: string) => CheckStatus,
   fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
   banner = true,
+  tags = true,
 ): Promise<{ pdf: Uint8Array; notes: string[] }> {
   const at: CheckStep = { stage: "load" };
   try {
-    return await drawCheckPdf(stamped, entries, status, fonts, banner, at);
+    return await drawCheckPdf(stamped, entries, status, fonts, banner, tags, at);
   } catch (e) {
     throw new CheckCopyError(at, e);
   }
@@ -1167,6 +1169,7 @@ async function drawCheckPdf(
   status: (id: string) => CheckStatus,
   fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
   banner: boolean,
+  tags: boolean,
   at: CheckStep,
 ): Promise<{ pdf: Uint8Array; notes: string[] }> {
   const step = (stage: string, id?: string) => {
@@ -1241,7 +1244,8 @@ async function drawCheckPdf(
   }
   const wanted: Head[] = [];
   for (const e of entries) {
-    if (e.kind !== "table") continue;
+    // Without tags no header is wanted, so none is laid out, drawn or noted.
+    if (!tags || e.kind !== "table") continue;
     step("table headers", e.id);
     const g = e.group as { header_rows?: unknown; header_cols?: unknown };
     const texts = (v: unknown): unknown[] => (Array.isArray(v) ? (v as unknown[]) : []);
@@ -1368,7 +1372,7 @@ async function drawCheckPdf(
       opacity: 0,
       borderOpacity: 0.9,
     });
-    if (!b.tagged) continue;
+    if (!tags || !b.tagged) continue;
     step("tag", b.id);
     const tag = asciiOnly(short.get(b.id) ?? b.id);
     const tw = helv.widthOfTextAtSize(tag, SIZE) + 1.6;
@@ -1450,6 +1454,9 @@ export interface FillAgentPdfArgs {
   check?: boolean;
   /** The check copy's legend line on page 1 (default true; preview_page passes false). */
   checkBanner?: boolean;
+  /** The check copy's id tags and table header texts (default true). False
+   *  leaves the outlines alone, so nothing is drawn over the print beside a box. */
+  checkTags?: boolean;
 }
 
 export interface FillAgentPdfResult {
@@ -1520,6 +1527,7 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
                 : "empty",
         a.fonts,
         a.checkBanner !== false,
+        a.checkTags !== false,
       );
       res.checkPdf = built.pdf;
       warnings.push(...built.notes);

@@ -177,7 +177,7 @@ export interface Field {
   group?: string | null;
   // Explicit flow order within a page (assigned when an owner reorders the
   // field-properties layer panel). Absent => fall back to reading-order
-  // geometry, so legacy templates are unaffected. See flowOrder.ts.
+  // geometry, so legacy templates are unaffected. See readOrder.ts.
   order?: number;
   // Author guidance + input hints. All optional/additive (legacy templates omit
   // them). `description` is help text (tooltip in Classic, sub-heading in

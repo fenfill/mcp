@@ -19,7 +19,14 @@
 
 import { randomUUID } from "node:crypto";
 
-import { buildFieldById, resolveMembers } from "@/app/t/[template_id]/fillCore";
+import {
+  agentEntries,
+  buildFieldById,
+  normalizeSchema,
+  resolveMembers,
+} from "@/app/t/[template_id]/fillCore";
+import { buildPageItems } from "@/app/t/[template_id]/pageLayout";
+import { boxEdges, type Edges, membersEdges, orderBlocks } from "@/app/t/[template_id]/readOrder";
 import { AUTOFILL_TOKENS, DATE_FORMATS } from "@/types";
 
 import {
@@ -62,8 +69,9 @@ import {
   tableIssues,
   type TableOpResult,
 } from "./tables.js";
+import { entryKey, type Refusal, type Screened } from "./echo.js";
 import type { RenderSchema } from "./types.js";
-import { fieldIssues, formatIssues, groupIssues, type Issue } from "./validate.js";
+import { fieldIssues, formatIssues, groupIssues, type Issue, sectionIssues } from "./validate.js";
 
 export type { Box } from "./doc.js";
 
@@ -135,7 +143,9 @@ export type Op =
   | { op: "set_orientation"; id: string; orientation: "col" | "row" }
   | { op: "set_header"; id: string; axis: "row" | "col"; index: number; text: string }
   | { op: "set_headers"; id: string; axis: "row" | "col"; texts: string[]; start?: number }
-  | { op: "reorder"; page: number; ids: string[] };
+  | { op: "reorder"; page: number; ids: string[] }
+  | { op: "set_section"; ids: string[]; section_id: string | null }
+  | { op: "set_section_title"; page: number; section_id: string; title: string };
 
 export const OP_NAMES = [
   "move",
@@ -164,6 +174,8 @@ export const OP_NAMES = [
   "set_header",
   "set_headers",
   "reorder",
+  "set_section",
+  "set_section_title",
 ] as const;
 
 export interface Rejected {
@@ -171,12 +183,31 @@ export interface Rejected {
   reason: string;
 }
 
+/** What a fill reads off a comb: its cell type, the date format in use, its length. */
+export interface CombFormat {
+  cell_type: "integer" | "char" | "date";
+  date_format: string | null;
+  max_length: number;
+}
+
 /** One applied op: its kind, whether a requested snap landed, and whether it changed nothing. */
 export interface OpOutcome {
   op_index: number;
   op: string;
   snapped?: boolean;
+  /** set_format on a comb group: the comb as a fill now reads it. */
+  comb?: CombFormat;
+  /** reorder: the page's top-level ids in the order now listed (each section one run). */
+  order?: string[];
+  /** set_section / set_section_title: the section as it now stands (null = none). */
+  section?: SectionRef | null;
   noop?: true;
+}
+
+/** A section of a page, as get_template names it. */
+export interface SectionRef {
+  id: string;
+  title: string;
 }
 
 export interface Touched {
@@ -202,6 +233,11 @@ export interface ApplyResult {
     ops: OpOutcome[];
   };
   warnings: string[];
+  /** What the echo guard refused in this batch: `told` = the ops rejected for
+   *  it (their reasons name the id and property), `confirmed` = the ops let
+   *  through on confirmWording. They hold the wording, so they stay in the
+   *  process and are never part of a tool result. */
+  screened: { told: Refusal[]; confirmed: Refusal[] };
 }
 
 /**
@@ -212,6 +248,9 @@ export type Snapper = (page: number, box: Box, mode: SnapMode) => { box: Box } |
 
 export interface ApplyOptions {
   snap?: Snapper;
+  /** The agent says the wording of these ops is the form's own: a refusal it
+   *  has already been told about (Refusal.shown) then applies, with a warning. */
+  confirmWording?: boolean;
 }
 
 /** Move/scale an item's boxes to `nb` (percent). Page bounds are checked on the
@@ -333,6 +372,12 @@ interface OneResult {
   tables?: string[];
   /** a snap the op asked for: whether it found its blank */
   snapped?: boolean;
+  /** a comb whose format the op set: what a fill reads off it is echoed */
+  comb?: string;
+  /** reorder: the page's entries as now listed */
+  order?: string[];
+  /** set_section / set_section_title: the section the op left */
+  section?: SectionRef | null;
 }
 
 /** Snap a single field's box (percent) to the blank under it, if the op asked. */
@@ -539,14 +584,23 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
               : "set_format applies to a field, or to a comb group (cell_type, date_format)",
           );
         }
+        const comb = g as Record<string, unknown>;
+        const dated = op.format.date_format !== undefined && op.format.date_format !== null;
         for (const [k, v] of Object.entries(op.format)) {
           if (k !== "cell_type" && k !== "date_format")
             bad(`a comb group's format keys are cell_type and date_format, not ${k}`);
           if (k === "date_format" && v !== null) checkCombDateFormat(d, g, v);
-          if (v === null) delete (g as Record<string, unknown>)[k];
-          else (g as Record<string, unknown>)[k] = v;
+          if (v === null) delete comb[k];
+          else comb[k] = v;
         }
-        return { touched: [g.id] };
+        // A fill reads a comb's date_format only on date cells (agentValues.ts),
+        // so giving one makes the comb a date comb.
+        if (dated) {
+          if (op.format.cell_type !== undefined && op.format.cell_type !== "date")
+            bad('date_format needs cell_type "date": leave cell_type out, or pass "date"');
+          comb.cell_type = "date";
+        }
+        return { touched: [g.id], comb: g.id };
       }
       const fld = f as Field;
       const own = d.owner.get(fld.id);
@@ -763,7 +817,11 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
     case "set_headers":
       return table(setHeaders(d, raw, warnings));
     case "reorder":
-      return reorder(d, raw);
+      return reorder(d, raw, warnings);
+    case "set_section":
+      return setSection(d, raw);
+    case "set_section_title":
+      return setSectionTitle(d, raw);
     default:
       return bad(`unknown op "${String((op as { op: unknown }).op)}"; ops: ${OP_NAMES.join(", ")}`);
   }
@@ -774,30 +832,35 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
  * together, in the given order, to where the first of them sat; everything
  * else keeps its order. Every entry of the page then carries an explicit
  * integer `order` (the web editor's layer panel convention), which wins over
- * the box-geometry order in the fill UI and get_template.
+ * the box-geometry order in the fill UI and get_template. "Where the first
+ * sat" is read off the page as the fill UI lists it (readOrder.ts, the one
+ * implementation of that order): by `order` when the page has one, else line
+ * by line.
+ *
+ * What a reader then sees is that order with every section gathered into one
+ * run (listedOrder), so entries of different sections cannot stand together
+ * whatever their ranks. The op returns the order now listed; it warns when the
+ * listed entries did not all come out as asked, and is rejected when nothing
+ * in the listing would change at all.
  */
-function reorder(d: Doc, op: Record<string, unknown>): OneResult {
+function reorder(d: Doc, op: Record<string, unknown>, warnings: string[]): OneResult {
   const page = pageOf(d, op.page);
   if (!Array.isArray(op.ids) || op.ids.length === 0)
     return bad("ids must list the entries to order");
-  type Block = { item: Field | Group; top: number; left: number };
-  const blocks: Block[] = [];
+  type Block = Edges & { item: Field | Group; order: number | undefined };
+  const orderOf = (item: Field | Group) =>
+    typeof item.order === "number" ? item.order : undefined;
+  const unordered: Block[] = [];
   for (const f of d.s.fields as Field[]) {
-    if (f.page === page && !d.owner.has(f.id)) blocks.push({ item: f, top: f.ypct, left: f.xpct });
+    if (f.page === page && !d.owner.has(f.id))
+      unordered.push({ ...boxEdges(f), item: f, order: orderOf(f) });
   }
   for (const g of d.s.groups as Group[]) {
     if (g.page !== page) continue;
-    const bb = bbox(members(d, g));
-    if (bb) blocks.push({ item: g, top: bb.y, left: bb.x });
+    const edges = membersEdges(members(d, g));
+    if (edges) unordered.push({ ...edges, item: g, order: orderOf(g) });
   }
-  const orderOf = (b: Block) => (typeof b.item.order === "number" ? b.item.order : undefined);
-  const hasOrder = blocks.some((b) => orderOf(b) !== undefined);
-  blocks.sort(
-    (a, b) =>
-      (hasOrder ? (orderOf(a) ?? Infinity) - (orderOf(b) ?? Infinity) || 0 : 0) ||
-      a.top - b.top ||
-      a.left - b.left,
-  );
+  const blocks = orderBlocks(unordered);
   const byId = new Map(blocks.map((b) => [b.item.id, b]));
   const want = op.ids.map((raw) => {
     const id = resolveId(d, raw, ["field", "group"], "ids entry");
@@ -820,10 +883,167 @@ function reorder(d: Doc, op: Record<string, unknown>): OneResult {
     ...want.map((id) => byId.get(id)!),
     ...rest.slice(before),
   ];
+  const was = listedOrder(d, page);
   next.forEach((b, i) => {
     b.item.order = i;
   });
-  return { touched: want };
+  const listed = listedOrder(d, page);
+  const from = listed.indexOf(want[0]);
+  const asAsked = from !== -1 && want.every((id, k) => listed[from + k] === id);
+  if (!asAsked) {
+    const why = `a section is listed as one run, standing where its first entry stands, and these ids span several (${sectionsOf(d, page, want)})`;
+    const fix =
+      "set_section {ids, section_id} moves an entry to another section; inside one section any order works";
+    if (listed.every((id, k) => id === was[k])) {
+      return bad(
+        `this order would change nothing in the listing: ${why}. ${fix[0].toUpperCase()}${fix.slice(1)}`,
+      );
+    }
+    warnings.push(
+      `reorder on page ${String(page)}: the ids are not all listed in the order asked, because ${why}. diff_summary.ops shows the order now listed; ${fix}`,
+    );
+  }
+  return { touched: want, order: listed };
+}
+
+/** A page's sections (id + title), in stored order. */
+function pageSections(d: Doc, page: number): SectionRef[] {
+  const pg = d.s.pages.find((p) => p.page === page) as { sections?: unknown } | undefined;
+  return (Array.isArray(pg?.sections) ? (pg.sections as unknown[]) : []).flatMap((s) =>
+    isRec(s) && typeof s.id === "string"
+      ? [{ id: s.id, title: typeof s.title === "string" ? s.title : "" }]
+      : [],
+  );
+}
+
+/** A group's members in reading order (the order the fill UI and get_template take them in). */
+function readingMembers(d: Doc, g: Group): Field[] {
+  if (!Array.isArray(g.members)) return [];
+  const byId = buildFieldById(d.s.fields as unknown as Parameters<typeof buildFieldById>[0]);
+  return resolveMembers(
+    g as unknown as Parameters<typeof resolveMembers>[0],
+    byId,
+  ) as unknown as Field[];
+}
+
+/**
+ * A page's top-level entries in the order a reader is shown them. It is the
+ * fill UI's own listing (pageLayout.ts buildPageItems, which the server's
+ * get_template order mirrors): the blocks by `order` or by printed line, then
+ * every section gathered into one run standing where its first block stands.
+ */
+function listedOrder(d: Doc, page: number): string[] {
+  type Args = Parameters<typeof buildPageItems>;
+  const info = d.s.pages.find((p) => p.page === page) as Record<string, unknown> | undefined;
+  const fields = (d.s.fields as Field[]).filter((f) => f.page === page && !d.owner.has(f.id));
+  // A group whose members are not a list has none to place, so it is not listed.
+  const groups = (d.s.groups as Group[]).filter((g) => g.page === page && Array.isArray(g.members));
+  const byId = buildFieldById(d.s.fields as unknown as Parameters<typeof buildFieldById>[0]);
+  const layout = buildPageItems(
+    { ...info, page, sections: pageSections(d, page) } as unknown as Args[0],
+    fields as unknown as Args[1],
+    groups as unknown as Args[2],
+    (g) => resolveMembers(g, byId),
+  );
+  return layout.items.flatMap((it) =>
+    it.kind === "header" ? [] : [it.kind === "field" ? it.field.id : it.group.id],
+  );
+}
+
+/** The section an entry is listed under: a field's own, a group's first member's
+ *  (reading order); none when that names no section of the page. */
+function sectionOf(d: Doc, page: number, id: string): SectionRef | null {
+  const g = d.group.get(id);
+  const sid = g ? readingMembers(d, g)[0]?.section_id : d.field.get(id)?.section_id;
+  if (typeof sid !== "string") return null;
+  return pageSections(d, page).find((s) => s.id === sid) ?? null;
+}
+
+/** `section "Income" (s2): id, id; no section: id` — at most three ids named per section. */
+function sectionsOf(d: Doc, page: number, ids: readonly string[]): string {
+  const by = new Map<string, { name: string; ids: string[] }>();
+  for (const id of ids) {
+    const sec = sectionOf(d, page, id);
+    const key = sec ? sec.id : "";
+    const row = by.get(key) ?? {
+      name: sec ? `section ${JSON.stringify(sec.title)} (${sec.id})` : "no section",
+      ids: [],
+    };
+    row.ids.push(id);
+    by.set(key, row);
+  }
+  return [...by.values()]
+    .map(
+      (r) =>
+        `${r.name}: ${r.ids.slice(0, 3).join(", ")}${r.ids.length > 3 ? ` and ${String(r.ids.length - 3)} more` : ""}`,
+    )
+    .join("; ");
+}
+
+/**
+ * set_section: the listed fields and groups (of one page) move to another of
+ * that page's sections, or out of every section (section_id: null). A group
+ * moves through all its members: the fill UI reads its section off the first
+ * member in reading order, this package's own helpers off the first in array
+ * order, so every member has to agree.
+ */
+function setSection(d: Doc, op: Record<string, unknown>): OneResult {
+  if (!Array.isArray(op.ids) || op.ids.length === 0)
+    return bad("ids must list the fields or groups to move");
+  const ids = [
+    ...new Set(
+      op.ids.map((raw) => {
+        const id = resolveId(d, raw, ["field", "group"], "ids entry");
+        const own = d.owner.get(id);
+        if (own) return bad(`${id} is an option/cell of group ${own.id}; move the group`);
+        return id;
+      }),
+    ),
+  ];
+  const pageOfEntry = (id: string) => (d.group.get(id) ?? d.field.get(id))?.page;
+  const page = pageOfEntry(ids[0]);
+  if (typeof page !== "number" || ids.some((id) => pageOfEntry(id) !== page))
+    return bad("all ids must be on one page: a section belongs to one page");
+  let section: SectionRef | null = null;
+  if (op.section_id === undefined) {
+    return bad("section_id is required (null takes the entries out of every section)");
+  }
+  if (op.section_id !== null) {
+    const sid = resolveId(d, op.section_id, ["section"], "section_id");
+    const found = pageSections(d, page).find((s) => s.id === sid);
+    if (!found) {
+      const have = pageSections(d, page).map((s) => `${s.id} ${JSON.stringify(s.title)}`);
+      return bad(
+        `section_id ${sid} is not a section of page ${String(page)} (${have.length ? `its sections: ${have.join(", ")}` : "the page has no sections"})`,
+      );
+    }
+    section = found;
+  }
+  for (const id of ids) {
+    const g = d.group.get(id);
+    for (const f of g ? members(d, g) : [d.field.get(id) as Field]) {
+      f.section_id = section ? section.id : null;
+    }
+  }
+  return { touched: ids, section };
+}
+
+/** set_section_title: the heading of one section of one page (section ids can
+ *  repeat from page to page, so the page is part of the address). */
+function setSectionTitle(d: Doc, op: Record<string, unknown>): OneResult {
+  const page = pageOf(d, op.page);
+  const sid = resolveId(d, op.section_id, ["section"], "section_id");
+  const pg = d.s.pages.find((p) => p.page === page) as { sections?: unknown } | undefined;
+  const sec = (Array.isArray(pg?.sections) ? (pg.sections as unknown[]) : []).find(
+    (s): s is Record<string, unknown> => isRec(s) && s.id === sid,
+  );
+  if (!sec) return bad(`section_id ${sid} is not a section of page ${String(page)}`);
+  if (typeof op.title !== "string" || !op.title.trim())
+    return bad("title is required: the heading the form prints over these fields");
+  sec.title = op.title.trim();
+  const issues = sectionIssues(sec, `section ${sid}`);
+  if (issues.length) return bad(issues.map((i) => `${i.path} ${i.reason}`).join("; "));
+  return { touched: [], section: { id: sid, title: sec.title as string } };
 }
 
 /** A comb's date_format: one D/M/Y letter per cell, e.g. DDMMYYYY for 8 cells. */
@@ -836,6 +1056,20 @@ function checkCombDateFormat(d: Doc, g: Group, v: unknown): void {
     bad(
       `a comb's date_format has one letter (D, M or Y) per cell: this comb has ${String(slots)} cells (e.g. ${slots === 8 ? "DDMMYYYY" : slots === 6 ? "DDMMYY" : "D".repeat(Math.min(2, slots)) + "…"})`,
     );
+  }
+}
+
+/** A comb as the fill core reads it off the schema (null when it reads none there). */
+function combFormat(render: RenderSchema, id: string): CombFormat | null {
+  try {
+    const schema = normalizeSchema(
+      structuredClone(render) as unknown as Parameters<typeof normalizeSchema>[0],
+    );
+    const e = agentEntries(schema).find((x) => x.id === id);
+    if (e?.kind !== "comb") return null;
+    return { cell_type: e.cellType, date_format: e.dateFormat, max_length: e.maxLength };
+  } catch {
+    return null;
   }
 }
 
@@ -864,14 +1098,16 @@ function touchedIssues(d: Doc, ids: readonly string[], tables: readonly string[]
   return out;
 }
 
-/** Wording ids that repeat an answer (echo.ts EchoGuard.check). */
-export type WordingScreen = (wording: readonly Wording[]) => { refuse: string[]; warn: string[] };
+/** Wording that repeats an answer (echo.ts EchoGuard.check). */
+export type WordingScreen = (wording: readonly Wording[]) => Screened;
 
 /**
  * Apply `ops` in order to a copy of `render`; each op is all-or-nothing.
  * `screen` (the echo guard) sees the wording each op adds or changes; an op
  * whose wording it refuses is rejected (the reason names the id and the
  * properties, never the text), one it warns about applies with a warning.
+ * With `opts.confirmWording`, a refusal the agent has already been told about
+ * applies instead, with a warning; one it has not seen is still rejected.
  */
 export function applyOps(
   render: RenderSchema,
@@ -906,6 +1142,8 @@ function applyPass(
   const touchedIds = new Set<string>();
   const warnings: string[] = [];
   const outcomes: OpOutcome[] = [];
+  const told: Refusal[] = [];
+  const confirmed: Refusal[] = [];
   let applied = 0;
   ops.forEach((raw, i) => {
     const skip = excluded.get(i);
@@ -927,17 +1165,35 @@ function applyPass(
             .join("; "),
         );
       }
+      let vouched: Refusal[] = [];
       if (screen) {
         const changed = changedWording(cur, draft);
-        const echo = changed.length ? screen(changed) : { refuse: [], warn: [] };
-        if (echo.refuse.length) {
-          bad(
-            `${describeWording(changed, echo.refuse)} matches an answer filled in this session. Labels, descriptions, placeholders, options and formats hold the form's own wording, never an answer: answers go only in fill values`,
-          );
+        const echo = changed.length ? screen(changed) : null;
+        if (echo?.refused.length) {
+          // An entry this op makes has an id the agent never sees (and a new
+          // one on every try): it is named as what it is.
+          const known = index(cur);
+          const name = (id: string) =>
+            known.field.has(id) || known.group.has(id) || known.section.has(id)
+              ? id
+              : "the new entry";
+          // Confirmable only once the agent has been told what matched: a flag
+          // sent ahead of the refusal confirms nothing.
+          if (opts.confirmWording === true && echo.refused.every((x) => x.shown)) {
+            vouched = echo.refused;
+            w.push(
+              `${describeWording(echo.refused, name)}: matches an answer filled in this session; applied because confirm_wording says it is the form's own wording`,
+            );
+          } else {
+            told.push(...echo.refused);
+            bad(
+              `${describeWording(echo.refused, name)} matches an answer filled in this session. Labels, descriptions, placeholders, options and formats hold the form's own wording, never an answer: answers go only in fill values. If this is the form's printed wording, send the op again with confirm_wording: true on the call`,
+            );
+          }
         }
-        for (const id of echo.warn) {
+        for (const id of echo?.warn ?? []) {
           w.push(
-            `${describeWording(changed, [id])}: short wording that matches a short answer from this session (allowed under 4 characters); check it is the form's own text`,
+            `${describeWording(changed.filter((x) => x.id === id))}: short wording that matches a short answer from this session (allowed under 4 characters); check it is the form's own text`,
           );
         }
       }
@@ -945,14 +1201,19 @@ function applyPass(
       // An op that leaves the schema exactly as it was (set_format to the same
       // value, a move by 0) still counts as applied, flagged so the agent knows.
       const noop = JSON.stringify(draft) === JSON.stringify(cur);
+      const comb = r.comb !== undefined ? combFormat(draft, r.comb) : null;
       outcomes.push({
         op_index: i,
         op: name,
         ...(r.snapped !== undefined ? { snapped: r.snapped } : {}),
+        ...(comb ? { comb } : {}),
+        ...(r.order ? { order: r.order } : {}),
+        ...(r.section !== undefined ? { section: r.section } : {}),
         ...(noop ? { noop: true as const } : {}),
       });
       cur = draft;
       applied++;
+      confirmed.push(...vouched);
       counts[name] = (counts[name] ?? 0) + 1;
       if (r.added) added.push({ op_index: i, id: r.added });
       if (r.geometry) placed.set(i, r.geometry);
@@ -996,14 +1257,18 @@ function applyPass(
       rejected,
       diff_summary: { counts, added, deleted, touched, ops: outcomes },
       warnings,
+      screened: { told, confirmed },
     },
     offPage,
   };
 }
 
-/** One string of a form's wording: the item id, the property it sits in. */
+/** One string of a form's wording: the item id, the property it sits in. A
+ *  section also carries its page: section ids repeat from page to page (`s1`,
+ *  `s2`, …), so the id alone does not say which section it is. */
 export interface Wording {
   id: string;
+  page?: number;
   prop: string;
   text: string;
 }
@@ -1014,9 +1279,9 @@ export interface Wording {
  */
 export function wordingOf(s: RenderSchema): Wording[] {
   const out: Wording[] = [];
-  const add = (id: unknown, prop: string, v: unknown) => {
+  const add = (id: unknown, prop: string, v: unknown, page?: unknown) => {
     if (typeof v === "string" && v.trim() && typeof id === "string")
-      out.push({ id, prop, text: v });
+      out.push({ id, ...(typeof page === "number" ? { page } : {}), prop, text: v });
   };
   const rec = (x: unknown): Record<string, unknown> | null =>
     typeof x === "object" && x !== null && !Array.isArray(x)
@@ -1039,34 +1304,49 @@ export function wordingOf(s: RenderSchema): Wording[] {
   for (const p of s.pages as Record<string, unknown>[]) {
     const secs = Array.isArray(p.sections) ? (p.sections as Record<string, unknown>[]) : [];
     for (const sec of secs)
-      for (const k of ["title", "description", "placeholder"]) add(sec.id, k, sec[k]);
+      for (const k of ["title", "description", "placeholder"]) add(sec.id, k, sec[k], p.page);
   }
   return out;
 }
 
-/** The wording of `next` that `prev` doesn't have (same id + property + text). */
+/** The wording of `next` that `prev` doesn't have (same entry + property + text). */
 export function changedWording(prev: RenderSchema, next: RenderSchema): Wording[] {
-  const before = new Set(wordingOf(prev).map((w) => `${w.id}\0${w.prop}\0${w.text}`));
-  return wordingOf(next).filter((w) => !before.has(`${w.id}\0${w.prop}\0${w.text}`));
+  const at = (w: Wording) => `${entryKey(w)}\0${w.prop}\0${w.text}`;
+  const before = new Set(wordingOf(prev).map(at));
+  return wordingOf(next).filter((w) => !before.has(at(w)));
 }
 
-/** Changed wording as [{id, properties}] per id: never the text itself. */
+/** Changed wording as [{id, properties}] per entry (a section with its page):
+ *  never the text itself. */
 export function wordingChanges(
   changed: readonly Wording[],
-): { id: string; properties: string[] }[] {
-  const by = new Map<string, Set<string>>();
+): { id: string; page?: number; properties: string[] }[] {
+  const by = new Map<string, { id: string; page?: number; props: Set<string> }>();
   for (const w of changed) {
-    const set = by.get(w.id) ?? new Set<string>();
-    set.add(w.prop);
-    by.set(w.id, set);
+    const key = entryKey(w);
+    const entry = by.get(key) ?? {
+      id: w.id,
+      ...(w.page === undefined ? {} : { page: w.page }),
+      props: new Set<string>(),
+    };
+    entry.props.add(w.prop);
+    by.set(key, entry);
   }
-  return [...by].map(([id, props]) => ({ id, properties: [...props].sort() }));
+  return [...by.values()].map(({ props, ...entry }) => ({
+    ...entry,
+    properties: [...props].sort(),
+  }));
 }
 
-/** "the label of f-1, the format.date_format of g-2" — ids + properties only. */
-function describeWording(changed: readonly Wording[], ids: readonly string[]): string {
-  const want = new Set(ids);
-  return wordingChanges(changed.filter((w) => want.has(w.id)))
-    .map((c) => `the ${c.properties.join("/")} of ${c.id}`)
+/** "the label of f-1, the title of s1 on page 2" — ids + properties only. */
+export function describeWording(
+  wording: readonly Wording[],
+  name: (id: string) => string = (id) => id,
+): string {
+  return wordingChanges(wording)
+    .map(
+      (c) =>
+        `the ${c.properties.join("/")} of ${name(c.id)}${c.page === undefined ? "" : ` on page ${String(c.page)}`}`,
+    )
     .join(", ");
 }

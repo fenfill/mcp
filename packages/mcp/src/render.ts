@@ -74,6 +74,13 @@ export interface Raster {
   rgba: Uint8Array;
 }
 
+/** A rendered page: its pixels and the scale they were drawn at. */
+export interface Rendered extends Raster {
+  /** Pixels per PDF point as rendered: the dpi asked for / 72, or less when
+   *  the longest side hit the cap. */
+  scale: number;
+}
+
 /** A region of the page in fractions, top-left origin. */
 export interface Region {
   x: number;
@@ -126,21 +133,23 @@ async function withPage<T>(
 /**
  * Render one page (1-based) of an in-memory PDF to RGBA pixels on white; with
  * `crop`, only that region of the page (at the same dpi). The longest output
- * side is capped at MAX_SIDE_PX.
+ * side is capped at `maxSide`: the image is then drawn at a smaller scale,
+ * which the result's `scale` says.
  */
 export async function renderPage(
   pdf: Uint8Array,
   page: number,
   dpi: number,
   crop?: Region,
-): Promise<Raster> {
+  maxSide: number = MAX_SIDE_PX,
+): Promise<Rendered> {
   return withPage(pdf, page, (m, pg, heap) => {
     const wPt = m.FPDF_GetPageWidthF(pg);
     const hPt = m.FPDF_GetPageHeightF(pg);
     const c = crop ?? { x: 0, y: 0, w: 1, h: 1 };
     let scale = dpi / 72;
     const longest = Math.max(wPt * c.w, hPt * c.h) * scale;
-    if (longest > MAX_SIDE_PX) scale *= MAX_SIDE_PX / longest;
+    if (longest > maxSide) scale *= maxSide / longest;
     const fullW = Math.max(1, Math.round(wPt * scale));
     const fullH = Math.max(1, Math.round(hPt * scale));
     const x0 = Math.round(c.x * fullW);
@@ -171,7 +180,7 @@ export async function renderPage(
         const row = buf + y * stride;
         rgba.set(h8.subarray(row, row + width * 4), y * width * 4);
       }
-      return { width, height, rgba };
+      return { width, height, rgba, scale };
     } finally {
       m.FPDFBitmap_Destroy(bmp);
     }

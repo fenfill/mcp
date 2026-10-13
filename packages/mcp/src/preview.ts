@@ -1,7 +1,9 @@
 // preview_page: the check copy of one page as a PNG, built and rendered in
 // memory. The check copy is fill_form's own (fillAgentPdf with `check`):
 // every field box outlined in its status colour and tagged with its short id,
-// with the values stamped when the agent passes them.
+// with the values stamped when the agent passes them. `overlay` takes the
+// tags away ("outline"), or the whole check copy ("none": the stamped page as
+// a fill writes it), for when a tag or an outline covers what must be read.
 //
 // PRIVACY: the stamped PDF and the image exist only in this process's memory
 // and in the tool result returned to the calling client. Nothing is written to
@@ -39,12 +41,28 @@ export interface PreviewArgs {
   fonts: Fonts;
   /** Render only this region of the page (fractions, top-left origin). */
   crop?: Region;
-  /** With crop: magnify (dpi × zoom, the image still capped at 3000 px). */
+  /** With crop: magnify (dpi × zoom, the image still capped at PREVIEW_MAX_SIDE_PX). */
   zoom?: number;
+  /** What is drawn over the page (default "full"). */
+  overlay?: Overlay;
 }
+
+/** "full": every box outlined and tagged, table headers printed. "outline":
+ *  the boxes only. "none": nothing, the page as a fill stamps it. */
+export const OVERLAYS = ["full", "outline", "none"] as const;
+export type Overlay = (typeof OVERLAYS)[number];
 
 /** The most a crop may magnify. */
 export const MAX_ZOOM = 8;
+
+/**
+ * A preview's longest side, in pixels. A client shrinks a larger image before
+ * the model sees it (the API takes no side over 2000 px once a conversation
+ * holds more than 20 images), and the agent then reads positions off a
+ * smaller image than the width and height this tool reported. Staying at the
+ * limit keeps the two the same. Snap renders (snap.ts) keep render.ts's cap.
+ */
+export const PREVIEW_MAX_SIDE_PX = 2000;
 
 export interface LegendRow {
   tag: string;
@@ -84,6 +102,8 @@ export interface Preview {
   png: Uint8Array;
   width: number;
   height: number;
+  /** The resolution the image was rendered at: dpi × zoom as asked, or less
+   *  when its longest side hit the size cap. */
   dpi: number;
   legend: LegendRow[];
   filled: number;
@@ -110,6 +130,26 @@ function boxOf(fs: readonly Pct[]): LegendRow["box"] | null {
 }
 
 const topId = (id: string): string => id.split(/[.[]/, 1)[0];
+
+/** The page of every id a value key can name: an entry's own, and through its
+ *  entry an option's, a table cell's or an expandable table's column's. */
+function idPages(entries: ReturnType<typeof agentEntries>): Map<string, number> {
+  const pages = new Map<string, number>();
+  for (const e of entries) {
+    const page = e.kind === "field" ? e.field.page : e.group.page;
+    pages.set(e.id, page);
+    const inner =
+      e.kind === "choice"
+        ? e.options
+        : e.kind === "table"
+          ? e.cells
+          : e.kind === "table_rows"
+            ? e.columns
+            : [];
+    for (const x of inner) if (!pages.has(x.id)) pages.set(x.id, page);
+  }
+  return pages;
+}
 
 /**
  * The legend of one page: every entry outlined on it with its tag (the same
@@ -272,6 +312,7 @@ export function legendChanges(
 
 export async function previewPage(a: PreviewArgs): Promise<Preview> {
   const dpi = Math.min(MAX_DPI, Math.max(MIN_DPI, Math.round(a.dpi ?? DEFAULT_DPI)));
+  const overlay = a.overlay ?? "full";
   const schema = normalizeSchema(a.render as unknown as Parameters<typeof normalizeSchema>[0]);
   const pages = schema.pages.map((p) => p.page);
   if (!pages.includes(a.page)) {
@@ -289,17 +330,20 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
       branding: null,
       logoBytes: null,
       loadImage,
-      check: true,
+      // "none" shows the stamped PDF itself: no check copy is built, so none can fail.
+      check: overlay !== "none",
       // preview_page's JSON carries the colour key; the banner would only
       // cover the top of page 1.
       checkBanner: false,
+      checkTags: overlay === "full",
     });
   } catch (e) {
     if (isPasswordError(e)) throw passwordError();
     if (isFillForbiddenError(e)) throw fillForbiddenError();
     throw e;
   }
-  if (!res.checkPdf) {
+  const shown = overlay === "none" ? res.pdf : res.checkPdf;
+  if (!shown) {
     // The build says where it stopped (stage, and the id it was drawing), so
     // the caller can correct that one field or group and preview again.
     const err = res.checkError;
@@ -313,16 +357,24 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
 
   const legend = legendRows(a.render, a.page);
   const ids = new Set(legend.map((r) => r.id));
-  const skipped = res.skipped.filter((s) => ids.has(topId(s.id)));
+  // A skip is this page's when its entry is on the page. A key that names
+  // nothing in the form is nobody's, so it is reported too: a mistyped or
+  // ambiguous id would otherwise vanish without a word on every page.
+  const where = idPages(agentEntries(schema));
+  const skipped = res.skipped.filter((s) => {
+    const top = topId(s.id);
+    const page = where.get(top);
+    return ids.has(top) || page === undefined || page === a.page;
+  });
   const warnings = res.warnings.filter((w) => {
     const head = w.slice(0, Math.max(0, w.indexOf(":")));
     return head.split(" and ").some((id) => ids.has(topId(id.trim())));
   });
 
   const zoom = a.crop ? Math.min(MAX_ZOOM, Math.max(1, a.zoom ?? 2)) : 1;
-  const raster = await renderPage(res.checkPdf, a.page, dpi * zoom, a.crop);
+  const raster = await renderPage(shown, a.page, dpi * zoom, a.crop, PREVIEW_MAX_SIDE_PX);
   // A crop's legend lists only what it shows.
-  const shown = a.crop
+  const listed = a.crop
     ? legend.filter((r) => {
         const c = a.crop!;
         return (
@@ -337,8 +389,10 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
     png: encodePng(raster),
     width: raster.width,
     height: raster.height,
-    dpi: dpi * zoom,
-    legend: shown,
+    // What was rendered, not what was asked: a capped image is coarser, and
+    // an agent reads sizes off it.
+    dpi: Math.round(raster.scale * 72 * 10) / 10,
+    legend: listed,
     filled: res.filled,
     skipped,
     warnings,

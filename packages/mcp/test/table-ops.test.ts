@@ -5,7 +5,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { applyOps, type Snapper } from "../src/edits.js";
+import { EchoGuard } from "../src/echo.js";
+import { applyOps, type Snapper, wordingChanges, wordingOf } from "../src/edits.js";
 import { legendChanges, legendPrints, legendRows } from "../src/preview.js";
 import type { RenderSchema } from "../src/types.js";
 import { schemaIssues } from "../src/validate.js";
@@ -461,6 +462,51 @@ describe("0.2.0 polish: set_headers, reorder, per-op outcomes, partial date form
     expect(schemaIssues(r.render)).toEqual([]);
   });
 
+  /** Two blanks on one printed line (the right box starts half a percent higher) and one below. */
+  const oneLine = (ranks: Record<string, number> = {}): RenderSchema => {
+    const at = (id: string, x: number, y: number) =>
+      fld(id, x, y, id in ranks ? { order: ranks[id] } : {});
+    return {
+      ...loose(),
+      fields: [
+        at("dddddd01-right", 60, 10),
+        at("dddddd02-left", 10, 10.5),
+        at("dddddd03-below", 10, 30),
+      ],
+      groups: [],
+    } as RenderSchema;
+  };
+  const orders = (s: RenderSchema) => Object.fromEntries(s.fields.map((f) => [f.id, f.order]));
+
+  it("reorder reads a page without order line by line: a same-line pair counts left first", () => {
+    // The page is listed left, right, below, so `left` is where the first of
+    // the two sat: the pair lands there, ahead of `right`.
+    const r = applyOps(oneLine(), [
+      { op: "reorder", page: 1, ids: ["dddddd03-below", "dddddd02-left"] },
+    ]);
+    expect(r.rejected).toEqual([]);
+    expect(orders(r.render)).toEqual({
+      "dddddd03-below": 0,
+      "dddddd02-left": 1,
+      "dddddd01-right": 2,
+    });
+    expect(schemaIssues(r.render)).toEqual([]);
+  });
+
+  it("reorder on a ranked page goes by the ranks, a same-line pair as ranked", () => {
+    // Ranked right, left, below: `left` sits second, and stays behind `right`.
+    const ranked = oneLine({ "dddddd01-right": 0, "dddddd02-left": 1, "dddddd03-below": 2 });
+    const r = applyOps(ranked, [
+      { op: "reorder", page: 1, ids: ["dddddd03-below", "dddddd02-left"] },
+    ]);
+    expect(r.rejected).toEqual([]);
+    expect(orders(r.render)).toEqual({
+      "dddddd01-right": 0,
+      "dddddd03-below": 1,
+      "dddddd02-left": 2,
+    });
+  });
+
   it("diff_summary.ops flags a no-op and says whether a snap landed", () => {
     const snap: Snapper = (_p, box) =>
       box.x < 0.3 ? { box: { ...box, y: box.y + 0.01 } } : { none: "no ruled cell around the box" };
@@ -494,6 +540,217 @@ describe("0.2.0 polish: set_headers, reorder, per-op outcomes, partial date form
       date_format: "DD/MM/YYYY",
       font_size: 9,
     });
+  });
+});
+
+describe("0.2.2: reorder reports the listing, set_section, set_section_title", () => {
+  const SECTIONS = [
+    { id: "sec-a", title: "Header" },
+    { id: "sec-b", title: "Income" },
+  ];
+  const A1 = "aaaaaa01-a1";
+  const A2 = "aaaaaa02-a2";
+  const B1 = "bbbbbb01-b1";
+  const B2 = "bbbbbb02-b2";
+  const LOOSE = "cccccc01-loose";
+  /** Section "Header" (a1, a2), then section "Income" (b1, b2), top to bottom;
+   *  with `loose`, a field in no section between the two. */
+  const sectioned = (loose = false): RenderSchema =>
+    ({
+      version: 5,
+      pages: [
+        {
+          page: 1,
+          width: 1000,
+          height: 1400,
+          image: "https://example.invalid/p1.png",
+          sections: structuredClone(SECTIONS),
+        },
+      ],
+      fields: [
+        fld(A1, 10, 10, { section_id: "sec-a" }),
+        fld(A2, 10, 20, { section_id: "sec-a" }),
+        ...(loose ? [fld(LOOSE, 10, 30, { section_id: null })] : []),
+        fld(B1, 10, 40, { section_id: "sec-b" }),
+        fld(B2, 10, 50, { section_id: "sec-b" }),
+      ],
+      groups: [],
+    }) as RenderSchema;
+  const outcome = (r: ReturnType<typeof applyOps>, i = 0) => r.diff_summary.ops[i];
+  const stamped = (s: RenderSchema) => s.fields.some((f) => f.order !== undefined);
+
+  it("reorder returns the order now listed; inside one section it comes out as asked", () => {
+    const r = applyOps(sectioned(true), [{ op: "reorder", page: 1, ids: [A2, A1] }]);
+    expect(r.rejected).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(outcome(r)).toEqual({ op_index: 0, op: "reorder", order: [A2, A1, LOOSE, B1, B2] });
+  });
+
+  it("a page asked for the order it already has applies, and is stamped", () => {
+    const all = [A1, A2, LOOSE, B1, B2];
+    const r = applyOps(sectioned(true), [{ op: "reorder", page: 1, ids: all }]);
+    expect(r.rejected).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(outcome(r).order).toEqual(all);
+    expect(r.render.fields.map((f) => f.order)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("across sections: what moved is applied with a warning that names the sections", () => {
+    // b2 and a1 go to where a1 sat, but each is listed with its own section.
+    const r = applyOps(sectioned(true), [{ op: "reorder", page: 1, ids: [B2, A1] }]);
+    expect(r.rejected).toEqual([]);
+    expect(outcome(r).order).toEqual([B2, B1, A1, A2, LOOSE]);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toMatch(
+      /^reorder on page 1: the ids are not all listed in the order asked/,
+    );
+    expect(r.warnings[0]).toContain(`section "Income" (sec-b): ${B2}`);
+    expect(r.warnings[0]).toContain(`section "Header" (sec-a): ${A1}`);
+    expect(r.warnings[0]).toMatch(/set_section \{ids, section_id\}/);
+  });
+
+  it("across sections: an order that changes nothing in the listing is rejected, also when repeated", () => {
+    // b1 before a2 would need b1 inside "Header": the listing stays a1, a2, b1, b2.
+    const ops = [{ op: "reorder", page: 1, ids: [B1, A2] }];
+    const r = applyOps(sectioned(), ops);
+    expect(r.applied).toBe(0);
+    expect(r.rejected).toHaveLength(1);
+    expect(r.rejected[0].reason).toMatch(/^this order would change nothing in the listing/);
+    expect(r.rejected[0].reason).toContain(`section "Income" (sec-b): ${B1}`);
+    expect(r.rejected[0].reason).toContain(`section "Header" (sec-a): ${A2}`);
+    expect(r.rejected[0].reason).toMatch(/Set_section \{ids, section_id\} moves an entry/);
+    expect(stamped(r.render)).toBe(false); // nothing was written
+    expect(applyOps(r.render, ops).rejected).toHaveLength(1);
+  });
+
+  it("set_section moves the entry, and the same reorder then comes out as asked", () => {
+    const r = applyOps(sectioned(), [
+      { op: "set_section", ids: [B1], section_id: "sec-a" },
+      { op: "reorder", page: 1, ids: [B1, A2] },
+    ]);
+    expect(r.rejected).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(outcome(r, 0)).toEqual({
+      op_index: 0,
+      op: "set_section",
+      section: { id: "sec-a", title: "Header" },
+    });
+    expect(F_(r.render, B1).section_id).toBe("sec-a");
+    expect(outcome(r, 1).order).toEqual([A1, B1, A2, B2]);
+    expect(schemaIssues(r.render)).toEqual([]);
+  });
+
+  it("set_section: null takes an entry out of every section; the same section again is a no-op", () => {
+    const r = applyOps(sectioned(), [
+      { op: "set_section", ids: [A2, B2], section_id: null },
+      { op: "set_section", ids: [A1], section_id: "sec-a" },
+    ]);
+    expect(r.rejected).toEqual([]);
+    expect([F_(r.render, A2).section_id, F_(r.render, B2).section_id]).toEqual([null, null]);
+    expect(outcome(r, 0).section).toBeNull();
+    expect(outcome(r, 1)).toMatchObject({ noop: true, section: { id: "sec-a" } });
+  });
+
+  it("set_section moves a group through all its members, and refuses what it cannot place", () => {
+    const s = loose();
+    (s.pages[0].sections as unknown[]).push({ id: "sec-2", title: "Status" });
+    s.pages.push({ ...s.pages[0], page: 2, sections: [{ id: "sec-p2", title: "Page two" }] });
+    s.fields.push(fld("eeeeee01-p2", 10, 10, { page: 2, section_id: "sec-p2" }));
+    const r = applyOps(s, [
+      { op: "set_section", ids: ["gggggg-choice"], section_id: "sec-2" },
+      { op: "set_section", ids: ["bbbbbb01-a"], section_id: "sec-2" }, // an option
+      { op: "set_section", ids: ["cccccc01-name"], section_id: "sec-p2" }, // another page's
+      { op: "set_section", ids: ["cccccc01-name", "eeeeee01-p2"], section_id: "sec-2" },
+      { op: "set_section", ids: ["cccccc01-name"] },
+      { op: "set_section", ids: [], section_id: "sec-2" },
+    ]);
+    expect(r.applied).toBe(1);
+    expect(["bbbbbb01-a", "bbbbbb02-b"].map((id) => F_(r.render, id).section_id)).toEqual([
+      "sec-2",
+      "sec-2",
+    ]);
+    expect(r.diff_summary.touched.map((t) => t.id)).toEqual(["gggggg-choice"]);
+    expect(r.rejected.map((x) => x.reason)).toEqual([
+      expect.stringMatching(/option\/cell of group gggggg-choice; move the group/),
+      expect.stringMatching(
+        /sec-p2 is not a section of page 1 \(its sections: sec-1 "History", sec-2 "Status"\)/,
+      ),
+      expect.stringMatching(/all ids must be on one page/),
+      expect.stringMatching(/section_id is required \(null takes/),
+      expect.stringMatching(/ids must list the fields or groups to move/),
+    ]);
+  });
+
+  it("set_section_title renames one section of one page, as the form's wording", () => {
+    const r = applyOps(sectioned(), [
+      { op: "set_section_title", page: 1, section_id: "sec-a", title: "  Personal details " },
+      { op: "set_section_title", page: 1, section_id: "sec-b", title: "   " },
+      { op: "set_section_title", page: 1, section_id: "sec-zzz", title: "X" },
+      { op: "set_section_title", section_id: "sec-a", title: "X" },
+    ]);
+    expect(r.applied).toBe(1);
+    expect(r.render.pages[0].sections).toEqual([
+      { id: "sec-a", title: "Personal details" },
+      { id: "sec-b", title: "Income" },
+    ]);
+    expect(outcome(r)).toEqual({
+      op_index: 0,
+      op: "set_section_title",
+      section: { id: "sec-a", title: "Personal details" },
+    });
+    expect(r.rejected.map((x) => x.reason)).toEqual([
+      expect.stringMatching(/title is required/),
+      expect.stringMatching(/no section has id sec-zzz/),
+      expect.stringMatching(/page must be a 1-based page number/),
+    ]);
+    expect(schemaIssues(r.render)).toEqual([]);
+
+    // A title is wording: the echo guard screens it like a label.
+    const g = new EchoGuard();
+    g.remember(sectioned(), { [A1]: "Kowalska" });
+    const screened = applyOps(
+      sectioned(),
+      [{ op: "set_section_title", page: 1, section_id: "sec-a", title: "Mrs Kowalska" }],
+      (w) => g.check(w),
+    );
+    expect(screened.applied).toBe(0);
+    expect(screened.rejected[0].reason).toMatch(/^the title of sec-a on page 1 matches an answer/);
+  });
+
+  it("a section is told apart by its page: the same id on two pages is two entries of wording", () => {
+    // The pipeline numbers sections page by page (s1, s2, …), so ids repeat.
+    const s = sectioned();
+    (s.pages[0].sections as { title: string }[])[0].title = "Mrs Kowalska";
+    s.pages.push({ ...s.pages[0], page: 2, sections: [{ id: "sec-a", title: "Other" }] });
+    const titles = (x: RenderSchema) =>
+      wordingOf(x)
+        .filter((w) => w.id === "sec-a")
+        .map((w) => [w.page, w.text]);
+    expect(titles(s)).toEqual([
+      [1, "Mrs Kowalska"],
+      [2, "Other"],
+    ]);
+
+    const g = new EchoGuard();
+    g.remember(s, { [A1]: "Kowalska" });
+    // Page 1's title reads so already; the same text on page 2 is a change of
+    // its own, screened and named with its page.
+    const op = { op: "set_section_title", page: 2, section_id: "sec-a", title: "Mrs Kowalska" };
+    const r = applyOps(s, [op], (w) => g.check(w, "t-x"));
+    expect(r.applied).toBe(0);
+    expect(r.rejected[0].reason).toMatch(/^the title of sec-a on page 2 matches an answer/);
+    g.tell(r.screened.told);
+
+    // Named on page 2 only: page 1's title is another entry, listed apart.
+    const both = wordingOf(applyOps(s, [op]).render).filter((w) => w.id === "sec-a");
+    expect(g.check(both, "t-x").refused.map((x) => [x.page, x.listed])).toEqual([
+      [1, false],
+      [2, true],
+    ]);
+    expect(wordingChanges(both)).toEqual([
+      { id: "sec-a", page: 1, properties: ["title"] },
+      { id: "sec-a", page: 2, properties: ["title"] },
+    ]);
   });
 });
 

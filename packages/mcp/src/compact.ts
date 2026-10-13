@@ -36,6 +36,8 @@ function compactEntry(e: AgentEntry): Json {
 
 export interface SectionBlock {
   page: number;
+  /** The section's id (edit_template's set_section / add take it); absent for entries in no section. */
+  section_id?: string;
   title?: string;
   fields: Json[];
 }
@@ -74,21 +76,31 @@ function listedPages(agent: AgentSchema, requested: readonly number[] | null): n
   return have.filter((p) => want.has(p));
 }
 
-/** Nest entries by (page, section), in first-appearance (reading) order. */
+/**
+ * Nest entries by section, in the order they are listed: one block per run of
+ * entries that share a page and a section. fenfill lists a section as one run,
+ * so it comes out as one block; entries in no section stay where they are
+ * listed, between the sections, instead of being gathered into one block.
+ */
 export function nestBySection(entries: readonly AgentEntry[]): SectionBlock[] {
-  const blocks = new Map<string, SectionBlock>();
+  const blocks: SectionBlock[] = [];
+  let run: string | null = null;
   for (const e of entries) {
-    const sid = e.section?.id ?? "";
-    const key = `${String(e.page)}\u0000${sid}`;
-    let b = blocks.get(key);
-    if (!b) {
+    const sid = e.section?.id;
+    const key = `${String(e.page)}\u0000${sid ?? ""}`;
+    if (key !== run) {
       const title = e.section?.title;
-      b = { page: e.page, ...(title ? { title } : {}), fields: [] };
-      blocks.set(key, b);
+      blocks.push({
+        page: e.page,
+        ...(sid ? { section_id: sid } : {}),
+        ...(title ? { title } : {}),
+        fields: [],
+      });
+      run = key;
     }
-    b.fields.push(compactEntry(e));
+    blocks[blocks.length - 1].fields.push(compactEntry(e));
   }
-  return [...blocks.values()];
+  return blocks;
 }
 
 export function compactView(

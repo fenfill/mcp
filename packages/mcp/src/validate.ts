@@ -292,7 +292,7 @@ export function groupIssues(g: unknown, path: string): Issue[] {
   return out;
 }
 
-function sectionIssues(s: unknown, path: string): Issue[] {
+export function sectionIssues(s: unknown, path: string): Issue[] {
   if (!isRec(s)) return [{ path, reason: "must be an object" }];
   const id = typeof s.id === "string" ? s.id : undefined;
   const out: Issue[] = [];
