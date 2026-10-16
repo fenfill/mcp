@@ -54,19 +54,33 @@ export function pageOfId(render: RenderSchema, id: string): number | undefined {
   return typeof p === "number" ? p : undefined;
 }
 
-/** The pages a batch of ops snaps on (the `page` of an add; the item's page otherwise). */
+/** The pages a batch of ops snaps on (the `page` of an add; the item's page
+ *  otherwise, a "$ref" naming what an earlier op of the batch added). */
 export function snapPages(
   ops: readonly unknown[],
   pageOfId: (id: string) => number | undefined,
 ): number[] {
   const out = new Set<number>();
+  const refPage = new Map<string, number>();
+  const pageOf = (id: unknown): number | undefined =>
+    typeof id !== "string"
+      ? undefined
+      : id.startsWith("$")
+        ? refPage.get(id.slice(1))
+        : pageOfId(id);
   for (const o of ops) {
     if (typeof o !== "object" || o === null) continue;
     const op = o as Record<string, unknown>;
+    // What this op adds lies on the page it names, or its first item's.
+    const here =
+      typeof op.page === "number"
+        ? op.page
+        : (pageOf(op.id) ?? (Array.isArray(op.ids) ? pageOf(op.ids[0]) : undefined));
+    if (typeof op.ref === "string" && here !== undefined) refPage.set(op.ref, here);
     if (op.snap === undefined) continue;
     if (op.op === "add" && typeof op.page === "number") out.add(op.page);
-    else if (typeof op.id === "string") {
-      const p = pageOfId(op.id);
+    else {
+      const p = pageOf(op.id);
       if (p !== undefined) out.add(p);
     }
   }

@@ -20,6 +20,7 @@ export {
   type AgentSkip,
   type AgentType,
   type AgentValuesResult,
+  checkTagIds,
   fillAgentPdf,
   type FillAgentPdfArgs,
   type FillAgentPdfResult,
@@ -27,7 +28,11 @@ export {
   type LoadImage,
   mapAgentValues,
   MCP_OUTPUT_TAG,
+  MIN_VALUE_PREFIX,
+  nestedIdOwners,
+  type NestedOwner,
   prefilledAcroFieldCount,
+  prefixHits,
 } from "./agentValues";
 export {
   bucketRows,

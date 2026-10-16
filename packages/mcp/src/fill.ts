@@ -23,6 +23,7 @@ import { expandHome } from "./config.js";
 import { ToolError } from "./errors.js";
 import type { Fonts } from "./fonts.js";
 import { toArrayBuffer } from "./fonts.js";
+import { printedBoxes } from "./render.js";
 import type { RenderSchema } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -298,6 +299,13 @@ export async function checkPathFor(
 }
 
 export async function stampAndWrite(a: StampArgs): Promise<StampResult> {
+  // The check copy's tags keep off the print (the blank's text layer; none on a scan).
+  const pages = Array.isArray(a.render.pages)
+    ? (a.render.pages as { page?: unknown }[])
+        .map((p) => p.page)
+        .filter((p): p is number => typeof p === "number")
+    : [];
+  const printed = a.checkAbs ? await printedBoxes(a.pdfBytes, pages) : undefined;
   let res: Awaited<ReturnType<typeof fillAgentPdf>>;
   try {
     res = await fillAgentPdf({
@@ -310,6 +318,7 @@ export async function stampAndWrite(a: StampArgs): Promise<StampResult> {
       loadImage,
       infoTags: OUTPUT_TAGS,
       check: !!a.checkAbs,
+      checkPrinted: printed,
     });
   } catch (e) {
     if (isPasswordError(e)) throw passwordError();

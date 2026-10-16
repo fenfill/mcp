@@ -421,6 +421,47 @@ try {
   );
   process.stderr.write("smoke: table ops + cropped preview ok\n");
 
+  // 0.2.3 comb ops: a date comb made and formatted in one batch through a ref,
+  // stamped with an ISO date, and listed in the legend with its cells.
+  const comb = await call({
+    ops: [
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        box: { x: 0.1, y: 0.7, w: 0.32, h: 0.03 },
+        cells: 8,
+        label: "Born",
+        ref: "born",
+      },
+      { op: "set_format", id: "$born", format: { date_format: "DDMMYYYY" } },
+    ],
+  });
+  const cid = comb.diff_summary.added[0].id;
+  assert.deepEqual(comb.diff_summary.ops[1].comb, {
+    cell_type: "date",
+    date_format: "DDMMYYYY",
+    max_length: 8,
+  });
+  const combShot = await client.callTool({
+    name: "preview_page",
+    arguments: {
+      path: plainPath,
+      page: 1,
+      dpi: 72,
+      values: { [cid.slice(0, 4)]: "1990-05-17" },
+      crop: { x: 0, y: 0.65, w: 1, h: 0.1 },
+    },
+  });
+  assert.ok(!combShot.isError, JSON.stringify(combShot.content).slice(0, 300));
+  const combMeta = JSON.parse(combShot.content[1].text);
+  assert.equal(combMeta.filled, 1, JSON.stringify(combMeta.skipped));
+  const combRow = combMeta.legend.find((l) => l.id === cid);
+  assert.equal(combRow.max_length, 8);
+  assert.equal(combRow.comb_cells.length, 8);
+  assert.deepEqual(combRow.comb_cells.map((c) => c.date_part).join(""), "DDMMYYYY");
+  process.stderr.write("smoke: comb ops + legend cells ok\n");
+
   // A refused re-analysis of our own output, offline: the tag check runs first.
   const refused = await client.callTool({
     name: "analyze_form",

@@ -778,6 +778,46 @@ describe("preview legend: changed mode and boxes", () => {
     expect(d2.changed[0].members_changed).toBe(1);
   });
 
+  it("does not list an untouched comb when another id lengthens its cells' tags", () => {
+    const withComb = (): RenderSchema => {
+      const s = loose();
+      s.fields.push(
+        fld("kkkkkk01-c0", 10, 90, { wpct: 3, group: "kkkkkk-comb" }),
+        fld("mmmmmm01-c1", 13, 90, { wpct: 3, group: "kkkkkk-comb" }),
+      );
+      s.groups.push({
+        id: "kkkkkk-comb",
+        kind: "comb",
+        label: "Code",
+        page: 1,
+        members: ["kkkkkk01-c0", "mmmmmm01-c1"],
+      } as G);
+      return s;
+    };
+    const s = withComb();
+    const before = legendPrints(legendRows(s, 1));
+    // A new field sharing "mmmmmm01" makes the second cell's tag longer.
+    const r = applyOps(s, [
+      { op: "add", page: 1, type: "text", box: { x: 0.5, y: 0.9, w: 0.1, h: 0.03 }, label: "X" },
+    ]);
+    r.render.fields.at(-1)!.id = "mmmmmm01-other";
+    const now = legendRows(r.render, 1);
+    const tags = (rows: typeof now) =>
+      rows.find((x) => x.id === "kkkkkk-comb")!.comb_cells!.map((c) => c.tag);
+    expect(tags(now)).not.toEqual(tags(legendRows(s, 1)));
+    const d = legendChanges(before, now);
+    expect(d.changed.map((x) => x.id)).toEqual(["mmmmmm01-other"]);
+    // A cell added in front lists that cell only, not every cell after it.
+    const r2 = applyOps(s, [
+      { op: "comb_add_cell", id: "kkkkkk-comb", box: { x: 0.07, y: 0.9, w: 0.03, h: 0.03 } },
+    ]);
+    expect(r2.rejected).toEqual([]);
+    const d2 = legendChanges(before, legendRows(r2.render, 1));
+    const comb = d2.changed.find((x) => x.id === "kkkkkk-comb")!;
+    expect(comb.comb_cells?.map((c) => c.box.x)).toEqual([0.07]);
+    expect(comb.members_changed).toBe(1);
+  });
+
   it("gives every option its own box", () => {
     const row = legendRows(loose(), 1).find((r) => r.id === "gggggg-choice")!;
     expect(row.options?.map((o) => o.box)).toEqual([
@@ -799,5 +839,93 @@ describe("preview legend: changed mode and boxes", () => {
       [2, 1],
     ]);
     expect(row.cells?.[3]).toMatchObject({ id: "aaaaaa02-r1", box: { y: 0.25 } });
+  });
+});
+
+describe("preview legend: what a comb and a date print", () => {
+  it("lists a date comb's cells, max_length, cell_type and date_format", () => {
+    const row = legendRows(fixture("canonical").render, 1).find((r) => r.id === "g-comb")!;
+    expect(row).toMatchObject({ cell_type: "date", max_length: 4, date_format: "DDMM" });
+    // One member over four printed cells: each cell by index, with its date letter.
+    expect(row.comb_cells?.map((c) => [c.index, c.date_part])).toEqual([
+      [0, "D"],
+      [1, "D"],
+      [2, "M"],
+      [3, "M"],
+    ]);
+    expect(row.comb_cells?.[1].box).toEqual({ x: 0.2, y: 0.5, w: 0.1, h: 0.04 });
+  });
+
+  it("lists a comb built of one field per cell by each cell's tag", () => {
+    const base = fixture("canonical").render;
+    const cells = [0, 1, 2].map((i) =>
+      fld(`cccccc0${String(i)}-cell`, 50 + i * 3, 80, { wpct: 3, hpct: 3 }),
+    );
+    const s = { ...base, fields: [...base.fields, ...cells] } as RenderSchema;
+    const r = applyOps(s, [
+      { op: "group", kind: "comb", ids: cells.map((c) => c.id), label: "Code" },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const row = legendRows(r.render, 1).find((x) => x.type === "comb" && x.id !== "g-comb")!;
+    expect(row).toMatchObject({ cell_type: "char", max_length: 3 });
+    expect(row.date_format).toBeUndefined();
+    expect(row.comb_cells?.map((c) => c.tag)).toEqual(["cccccc00", "cccccc01", "cccccc02"]);
+    // The other tags keep the lengths the check copy prints.
+    expect(row.tag).toHaveLength(6);
+  });
+
+  it("lists a single field drawn over cells by its length, never as a date comb", () => {
+    // A date field over printed cells takes one character per cell, as typed.
+    const r = applyOps(fixture("canonical").render, [
+      { op: "ungroup", id: "g-comb" },
+      { op: "retype", id: "f-comb", type: "date" },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const row = legendRows(r.render, 1).find((x) => x.id === "f-comb")!;
+    expect(row).toMatchObject({ type: "comb", max_length: 4 });
+    expect(row.date_format).toBeUndefined();
+    expect(row.cell_type).toBeUndefined();
+    expect(row.comb_cells?.map((c) => c.index)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("gives every date field and table date cell the format it prints", () => {
+    const canon = legendRows(fixture("canonical").render, 1);
+    // No stored format: the default.
+    expect(canon.find((r) => r.id === "f-date")?.date_format).toBe("DD/MM/YYYY");
+    expect(canon.find((r) => r.id === "f-text")?.date_format).toBeUndefined();
+  });
+
+  it("agrees with the agent schema on every date format, comb length and cell type", () => {
+    for (const name of [
+      "canonical",
+      "classic_tables",
+      "expandable_tables",
+      "ungrouped_fields",
+    ] as const) {
+      const { render, agent } = fixture(name);
+      const pages = [...new Set(render.pages.map((p) => p.page))];
+      const rows = pages.flatMap((p) => legendRows(render, p));
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      for (const e of agent.fields as unknown as Record<string, unknown>[]) {
+        const row = byId.get(e.id as string);
+        expect(row, `${name}: ${String(e.id)}`).toBeDefined();
+        if (e.type === "date") expect(row!.date_format).toBe(e.date_format);
+        if (e.type === "comb") {
+          expect(row!.max_length).toBe(e.max_length);
+          expect(row!.cell_type).toBe(e.cell_type);
+          expect(row!.date_format ?? null).toBe(e.date_format ?? null);
+        }
+        for (const c of (e.cells as Record<string, unknown>[] | undefined) ?? []) {
+          const cell = row!.cells?.find((x) => x.id === c.id);
+          expect(cell?.date_format ?? null, `${name}: cell ${String(c.id)}`).toBe(
+            c.date_format ?? null,
+          );
+        }
+        for (const c of (e.columns as Record<string, unknown>[] | undefined) ?? []) {
+          const col = row!.columns?.find((x) => x.id === c.id);
+          expect(col?.date_format ?? null).toBe(c.date_format ?? null);
+        }
+      }
+    }
   });
 });

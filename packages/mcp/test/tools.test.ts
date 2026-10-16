@@ -211,7 +211,7 @@ describe("preview_page overlay", () => {
     };
     const full = await shot();
     expect("overlay" in full).toBe(false);
-    expect(full.colours).toMatch(/tagged below it/);
+    expect(full.colours).toMatch(/tagged beside it, off its caption/);
     expect(await shot("full")).toEqual(full);
 
     const outline = await shot("outline");
@@ -290,6 +290,49 @@ describe("values keyed by short ids", () => {
     expect(String((e.data.rejected as { reason: string }[])[0].reason)).toMatch(
       /matches an answer filled in this session/,
     );
+  });
+});
+
+describe("get_template with local edits", () => {
+  it("lists the working copy (edited: true), or with version saved fenfill's", async () => {
+    const tplPdf = await pdfFor(render);
+    const { mock } = templateMock(tplPdf);
+    const c = await server(mock);
+    const before = await c.call("get_template", { template_id: TPL });
+    expect(before.data).toMatchObject({ has_local_edits: false, edited: false });
+
+    const e = await c.call("edit_template", {
+      template_id: TPL,
+      ops: [
+        { op: "relabel", id: nameId, label: "Full legal name" },
+        { op: "delete", id: cityId },
+        {
+          op: "add",
+          page: 2,
+          type: "date",
+          box: { x: 0.6, y: 0.85, w: 0.2, h: 0.03 },
+          label: "Date signed",
+        },
+      ],
+    });
+    expect(e.data).toMatchObject({ applied: 3, has_edits: true });
+    const added = (e.data.diff_summary as { added: { id: string }[] }).added[0].id;
+
+    const listed = (r: { data: Record<string, unknown> }) =>
+      (r.data.sections as { fields: { id: string; label: string }[] }[]).flatMap((b) => b.fields);
+    const g = await c.call("get_template", { template_id: TPL });
+    expect(g.data).toMatchObject({ has_local_edits: true, edited: true });
+    const ids = listed(g).map((x) => x.id);
+    expect(ids).toContain(added);
+    expect(ids).not.toContain(cityId);
+    expect(listed(g).find((x) => x.id === nameId)?.label).toBe("Full legal name");
+    expect(g.data.local_edits).toMatch(/your local working copy/);
+
+    const s = await c.call("get_template", { template_id: TPL, version: "saved" });
+    expect(s.data).toMatchObject({ has_local_edits: true, edited: false });
+    expect(listed(s).map((x) => x.id)).toContain(cityId);
+    expect(listed(s).map((x) => x.id)).not.toContain(added);
+    expect(mock.count("PATCH", /./)).toBe(0);
   });
 });
 
@@ -657,6 +700,60 @@ describe("the echo guard (Q3)", () => {
     const ok = await c.call("save_template", { template_id: TPL });
     expect(ok.isError).toBe(false);
     expect(String((ok.data.warnings as string[])[0])).toContain(cityId);
+  });
+
+  /** Three text cells labelled `labels`, grouped into a comb; returns the cell ids. */
+  const combOfCells = async (c: Awaited<ReturnType<typeof server>>, labels: string[]) => {
+    const e = await c.call("edit_template", {
+      template_id: TPL,
+      ops: labels.map((label, i) => ({
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.5 + 0.03 * i, y: 0.9, w: 0.03, h: 0.03 },
+        label,
+      })),
+    });
+    const cells = (e.data.diff_summary as { added: { id: string }[] }).added.map((a) => a.id);
+    const g = await c.call("edit_template", {
+      template_id: TPL,
+      ops: [{ op: "group", kind: "comb", ids: cells, label: "Code" }],
+    });
+    expect(g.data).toMatchObject({ applied: 1 });
+    return cells;
+  };
+
+  it("save_template passes a comb cell's placeholder label equal to a short answer, without a warning", async () => {
+    // A corrector building a comb cell by cell gave each cell a placeholder
+    // label; a test answer equal to one ("D1") must not block the save.
+    const { mock } = templateMock(await pdfFor(render));
+    const c = await server(mock);
+    const cells = await combOfCells(c, ["D1", "D2", "D3"]);
+    await c.call("fill_template", {
+      template_id: TPL,
+      values: { [nameId]: "D1" },
+      output_path: join(t.dir, "a.pdf"),
+    });
+    const s = await c.call("save_template", { template_id: TPL });
+    expect(s.isError).toBe(false);
+    expect(s.data).toMatchObject({ saved: true });
+    expect(JSON.stringify(s.data.warnings ?? [])).not.toContain(cells[0]);
+  });
+
+  it("save_template refuses a comb cell's label equal to an answer of 4+ characters", async () => {
+    // A PIN or a postcode written into a cell's label would reach the server.
+    const { mock } = templateMock(await pdfFor(render));
+    const c = await server(mock);
+    const cells = await combOfCells(c, ["1234", "SW1A", "C3"]);
+    await c.call("fill_template", {
+      template_id: TPL,
+      values: { [nameId]: "1234", [cityId]: "SW1A" },
+      output_path: join(t.dir, "a.pdf"),
+    });
+    const s = await c.call("save_template", { template_id: TPL });
+    expect(s.data.error).toMatchObject({ code: "answer_in_template" });
+    expect((s.data.error as { ids: string[] }).ids.sort()).toEqual([cells[0], cells[1]].sort());
+    expect(mock.count("PATCH", /./)).toBe(0);
   });
 
   it("save_template refuses wording that repeats an answer filled after the edit", async () => {

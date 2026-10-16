@@ -69,7 +69,8 @@ import {
 } from "./edits.js";
 import { mergeAnalyses, soleTemplateId } from "./merge.js";
 import { parsePageSpec } from "./pages.js";
-import { placementWarnings, stampedSizes } from "./placement.js";
+import { placementReport, stampedSizes } from "./placement.js";
+import { projectAgentSchema } from "./project.js";
 import {
   legendChanges,
   legendPrints,
@@ -148,7 +149,7 @@ const PAGES = z
 const VALUES = z
   .record(z.string(), z.unknown())
   .describe(
-    "Field id → value (see description). An id may be shortened to an unambiguous prefix of 6+ characters (the preview tags), a table's cell or column id inside its value too; a key that matches nothing is listed in skipped.",
+    "Field id → value (see description). Any id may be shortened to an unambiguous prefix of 4+ characters (the preview tags show 6), a table's cell or column id inside its value and an option id in a choice's value too. A table cell's id given at the top level goes into its table; an option's id given true selects it (a radio's value, or one more item of a multiselect). A date comb (a comb group with cell_type date) takes the whole date as one string: YYYY-MM-DD (laid out by its date_format), or its max_length digits in printed order; a single field drawn over cells takes one character per cell, as typed. A key that matches nothing, or starts several ids, is listed in skipped with candidates.",
   );
 const OUTPUT_PATH = z
   .string()
@@ -694,17 +695,36 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     {
       title: "Get a template's fields",
       description:
-        "Get a saved template's fillable fields (ids, types, labels) for fill_template. Use pages to narrow a large form. unanalyzed_pages (when present) lists pages fenfill never analyzed: they have no fields yet; reanalyze_template with kind scratch analyzes them.",
-      inputSchema: { template_id: TEMPLATE_ID, pages: PAGES },
+        "Get a saved template's fillable fields (ids, types, labels) for fill_template. Use pages to narrow a large form. With local edits (edit_template) it lists your working copy, as fill_template and preview_page use it (edited: true): new ids, deletions, sections and order show before you save; version: \"saved\" lists fenfill's saved version instead. unanalyzed_pages (when present) lists pages fenfill never analyzed: they have no fields yet; reanalyze_template with kind scratch analyzes them.",
+      inputSchema: {
+        template_id: TEMPLATE_ID,
+        pages: PAGES,
+        version: z
+          .enum(["working", "saved"])
+          .optional()
+          .describe(
+            '"working" (default): your local edits when there are any, else the saved template. "saved": fenfill\'s saved version, whatever you edited.',
+          ),
+      },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    run("get_template", async ({ template_id, pages }, _extra, signal) => {
-      const { body } = await api().getJson<AgentSchema>(
+    run("get_template", async ({ template_id, pages, version }, _extra, signal) => {
+      const { body: saved } = await api().getJson<AgentSchema>(
         `/templates/${encodeURIComponent(template_id)}`,
         { signal },
       );
       const requested = pages?.trim() ? parsePageSpec(pages) : null;
-      const { unanalyzed } = analyzedPagesOf(body);
+      const { unanalyzed } = analyzedPagesOf(saved);
+      const wc = await templateEdits(template_id);
+      const listWorking = !!wc && version !== "saved";
+      // The working copy's fields, with the saved template's name and pages
+      // (which pages fenfill analyzed is the server's to say).
+      const body: AgentSchema = listWorking
+        ? {
+            ...saved,
+            fields: projectAgentSchema(wc.render, { template_id, name: saved.name }).fields,
+          }
+        : saved;
       return {
         template_id: body.template_id ?? template_id,
         ...(unanalyzed.length
@@ -714,13 +734,15 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
                 'These pages were never analyzed, so they have no fields yet. reanalyze_template {template_id, pages, kind: "scratch"} analyzes them (1 page scan per page).',
             }
           : {}),
-        ...((await templateEdits(template_id))
+        ...(wc
           ? {
               has_local_edits: true,
-              local_edits:
-                "This template has local edits (edit_template) that fill_template and preview_page use; the fields listed are fenfill's saved version. save_template keeps them; edit_template with discard: true drops them.",
+              edited: listWorking,
+              local_edits: listWorking
+                ? "The fields listed are your local working copy (edit_template), as fill_template and preview_page use it; fenfill's saved version differs until save_template. edit_template with discard: true drops the edits."
+                : 'This template has local edits (edit_template) that fill_template and preview_page use; the fields listed are fenfill\'s saved version (version: "saved"). save_template keeps the edits; edit_template with discard: true drops them.',
             }
-          : { has_local_edits: false }),
+          : { has_local_edits: false, edited: false }),
         ...compactView(
           body,
           requested,
@@ -798,7 +820,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "preview_page",
     {
       title: "Preview a page with its field boxes",
-      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin, as edit_template uses), format and font_pt; options, table cells (row, col) and table_rows columns with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: much larger text than the page's other fields, a box over printed text (not on scans), a box past its ruled cell. Use it as a read-only placement audit. values (see that parameter) stamp test values. overlay: "outline" drops the tags, "none" shows the page with only the stamped values (to read print under a tag, or after check_copy_failed). crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now inside a table or group). It renders the local working copy (edit_template) when one exists, else the saved or analyzed version (edited: true/false). Rendered on this machine: nothing is written to disk and the values are never sent anywhere.`,
+      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin, as edit_template uses), format and font_pt; options, table cells (row, col), table_rows columns and (in a crop) comb cells with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: text much larger than its neighbours', a box over printed text (not on scans; a pale hint at its left edge is a placement_note), a box past its ruled cell, an option box on the wrong side of its caption. Use it as a read-only placement audit. values (see that parameter) stamp test values. overlay: "outline" drops the tags, "none" shows only the stamped page (e.g. after check_copy_failed). crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now inside a table or group). It renders the local working copy (edit_template) when one exists, else the saved or analyzed version (edited: true/false). Rendered on this machine: nothing is written to disk and the values are never sent anywhere.`,
       inputSchema: {
         path: TARGET_PATH,
         template_id: TARGET_TEMPLATE,
@@ -842,7 +864,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .enum(OVERLAYS)
           .optional()
           .describe(
-            'What is drawn over the page: "full" (default) = every box outlined and tagged, table headers printed; "outline" = the boxes only, no id tags and no table header texts; "none" = nothing, the page as a fill stamps it. Use "outline" or "none" when a tag covers a caption, a tick box or a stamped value. The legend and placement_warnings are the same in all three.',
+            'What is drawn over the page: "full" (default) = every box outlined and tagged, table headers printed; the tags keep off the printed text and the stamped values (a tag with no room beside its box is moved off and joined to it by a thin line); "outline" = the boxes only, no id tags and no table header texts; "none" = nothing, the page as a fill stamps it. Use "outline" or "none" when an outline covers what you must read, or on a scan (no text layer: there a tag may still cover print). The legend and placement_warnings are the same in all three.',
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -886,12 +908,12 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         });
         // Placement over every box the page (or crop) shows: a gold review
         // must see a box sitting on a printed hint before it edits anything.
-        const placement = await placementWarnings(
+        const placement = await placementReport(
           bytes,
           render,
           pv.legend.map((r) => r.id),
           { pageWide: true, cells: true },
-        ).catch(() => []);
+        ).catch(() => ({ warnings: [], notes: [] }));
         // Resolved font sizes for the legend's single-line fields.
         const sizes = await stampedSizes(bytes, render, args.page).catch(
           () => new Map<string, { font_pt: number; font_auto: boolean }>(),
@@ -908,7 +930,14 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         const shownIds = new Set(pv.legend.map((r) => r.id));
         const diff = mode === "changed" ? legendChanges(before, full) : null;
         const changes = diff && {
-          changed: diff.changed.filter((r) => shownIds.has(r.id)),
+          // A whole page lists combs without their cells, as its full legend does.
+          changed: diff.changed
+            .filter((r) => shownIds.has(r.id))
+            .map((r) => {
+              if (args.crop || !r.comb_cells) return r;
+              const { comb_cells: _cells, ...rest } = r;
+              return rest;
+            }),
           removed: diff.removed,
           moved_into: diff.moved_into,
         };
@@ -934,7 +963,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
                 }
               : {
                   colours:
-                    "green = filled, orange = filled with a warning, red = skipped, grey dashed = empty; a radio/multiselect option has a thin box tagged below it",
+                    "green = filled, orange = filled with a warning, red = skipped, grey dashed = empty; a radio/multiselect option has a thin box tagged beside it, off its caption (a tag moved further off has a thin line to its box)",
                 }),
           ...(args.crop ? { crop: args.crop } : {}),
           ...(mode === "none"
@@ -951,7 +980,9 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           ...(pv.skipped.length ? { skipped: pv.skipped } : {}),
           // Always present: [] means checked and clean, never "not computed".
           warnings: pv.warnings,
-          placement_warnings: placement,
+          placement_warnings: placement.warnings,
+          // A pale hint under a box (written over, not a misplacement).
+          ...(placement.notes.length ? { placement_notes: placement.notes } : {}),
         };
         log("info", "tool ok", { tool: "preview_page", ms: Date.now() - t0 });
         return {
@@ -983,7 +1014,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .max(MAX_OPS)
           .optional()
           .describe(
-            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type char|integer|date, or date_format with one D/M/Y letter per cell, e.g. DDMMYYYY, which makes it a date comb; diff_summary.ops shows the comb's cell_type, date_format and max_length); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where the first sat (stamps order; geometry no longer decides); diff_summary.ops shows the order now listed. A section is listed as one run where its first entry stands, so entries of different sections never stand together: set_section {ids, section_id | null} moves fields or groups of one page to another of its sections (get_template shows each section's section_id; null = no section), and set_section_title {page, section_id, title} renames one. A reorder whose ids cannot come out as asked and that would change nothing in the listing is rejected. Every cell of one column (or row, when orientation is row) has one type.`,
+            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id, diff_summary.ops the section it landed in: without section_id, that of the nearest field at or above it); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type char|integer|date, or date_format with one D/M/Y letter per cell, e.g. DDMMYYYY, which makes it a date comb; diff_summary.ops shows the comb's cell_type, date_format and max_length); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options; the members keep their ids, and diff_summary.ops lists them in reading order with the group's section; the group stands where its earliest member stood); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Combs in one op: add {type: "comb", page, label, cells: N (box cut into N equal cells) | [{x, y, w, h}, …] (each printed cell's box, for cells split by separators), box?, cell_type?, date_format?, section_id?} (its cells have no label); retype {id, type: "comb", cells, cell_type?, date_format?} turns a text/date field into a comb over its box, keeping label, section, order and required; comb_add_cell {id: comb, box, date_format?} and comb_remove_cell {id: cell, date_format?} (a date comb needs its new date_format, one letter per cell); group {kind: "comb"} takes cell_type and date_format too, and set_format on a comb's cell applies to its comb. Refs: any op that adds something takes ref: "name", and later ops of the same call write "$name" for its id (set_format {id: "$dob", …}). Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where whichever of them is listed first now stands (not ids[0]'s place); every other entry keeps its relative order (stamps order; geometry no longer decides). A partial list moves only what it names: to put B right after A, list both; chained partial reorders are simplest replaced by one with the page's whole list. diff_summary.ops shows the order now listed. A section is listed as one run where its first entry stands, so entries of different sections never stand together: set_section {ids, section_id | null} moves fields or groups of one page to another of its sections (get_template shows each section's section_id; null = no section), and set_section_title {page, section_id, title} renames one. A reorder whose ids cannot come out as asked and that would change nothing in the listing is rejected. Every cell of one column (or row, when orientation is row) has one type.`,
           ),
         discard: z
           .boolean()
@@ -1108,14 +1139,17 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         confirmWording: confirm_wording === true,
       });
       let placement: string[] = [];
+      let placementNotes: string[] = [];
       if (r.applied > 0) {
         const ids = [
           ...r.diff_summary.touched.map((t) => t.id),
           ...r.diff_summary.added.map((a) => a.id),
         ];
-        placement = await blank()
-          .then((pdf) => placementWarnings(pdf, r.render, ids, { cells: true }))
-          .catch(() => []);
+        const report = await blank()
+          .then((pdf) => placementReport(pdf, r.render, ids, { cells: true }))
+          .catch(() => ({ warnings: [], notes: [] }));
+        placement = report.warnings;
+        placementNotes = report.notes;
       }
       // Taking over a copy whose changed wording another process wrote: that
       // wording stays unvouched until save_template's confirm_wording.
@@ -1160,6 +1194,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
               `${i.id ? `${i.id}: ` : ""}${i.path} ${i.reason} (fenfill would refuse to save this; fix it with another op)`,
           ),
         ],
+        ...(placementNotes.length ? { notes: placementNotes } : {}),
         has_edits: hasEdits,
         ops_applied_total: changed ? out.ops_applied : wc.ops_applied,
         saveable: !!saveTarget,

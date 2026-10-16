@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { EchoGuard } from "../src/echo.js";
 import { applyOps, changedWording, MAX_OPS, wordingOf } from "../src/edits.js";
+import { snapPages } from "../src/snap.js";
 import { encodePng, renderPage } from "../src/render.js";
 import type { RenderSchema } from "../src/types.js";
 import { schemaIssues } from "../src/validate.js";
@@ -16,6 +17,7 @@ import { fixture } from "./helpers.js";
 const canon = (): RenderSchema => fixture("canonical").render;
 const field = (s: RenderSchema, id: string) => s.fields.find((f) => f.id === id)!;
 const group = (s: RenderSchema, id: string) => s.groups.find((g) => g.id === id)!;
+const round2 = (n: unknown) => Math.round((n as number) * 100) / 100;
 
 describe("applyOps", () => {
   it("move (dx/dy and x/y) and resize work in page fractions, top-left origin", () => {
@@ -174,6 +176,39 @@ describe("applyOps", () => {
     expect(schemaIssues(r3.render)).toEqual([]);
   });
 
+  it("a new group lists its members and its section, and stands where its first member stood", () => {
+    const s = canon();
+    // The page carries an explicit order: f-text first, then the date field.
+    const r = applyOps(s, [
+      {
+        op: "add",
+        page: 1,
+        type: "checkbox",
+        box: { x: 0.5, y: 0.7, w: 0.02, h: 0.02 },
+        label: "P",
+      },
+      {
+        op: "add",
+        page: 1,
+        type: "checkbox",
+        box: { x: 0.6, y: 0.7, w: 0.02, h: 0.02 },
+        label: "Q",
+      },
+    ]);
+    const [p, q] = r.diff_summary.added.map((x) => x.id);
+    expect(r.diff_summary.ops[0].section).toEqual({ id: "sec-1", title: "Personal details" });
+    const ranked = applyOps(r.render, [
+      { op: "reorder", page: 1, ids: ["f-text", q, p, "f-date"] },
+    ]).render;
+    const g = applyOps(ranked, [{ op: "group", ids: [p, q], kind: "choice", label: "Pick" }]);
+    expect(g.rejected).toEqual([]);
+    const out = g.diff_summary.ops[0];
+    expect(out.members).toEqual([p, q]); // reading order, not the order asked
+    expect(out.section).toEqual({ id: "sec-1", title: "Personal details" });
+    const gid = g.diff_summary.added[0].id;
+    expect(group(g.render, gid).order).toBe(field(ranked, q).order);
+  });
+
   it("rejects bad ops with reasons and leaves the schema untouched", () => {
     const before = canon();
     const r = applyOps(before, [
@@ -256,6 +291,273 @@ describe("applyOps", () => {
 
   it(`caps nothing itself but MAX_OPS is ${String(MAX_OPS)}`, () => {
     expect(MAX_OPS).toBe(200);
+  });
+});
+
+describe("comb ops and batch refs", () => {
+  /** Eight printed cells split by slashes after DD and MM: DD / MM / YYYY. */
+  const dateCells = () =>
+    [0, 1, 3, 4, 6, 7, 8, 9].map((k) => ({ x: 0.5 + k * 0.03, y: 0.9, w: 0.025, h: 0.03 }));
+  const combOf = (s: RenderSchema, id: string) => {
+    const g = group(s, id) as { members: string[]; cell_type?: string; date_format?: string };
+    return { ...g, cells: g.members.map((m) => field(s, m)) };
+  };
+
+  it("makes a date comb from its cells' boxes and formats it in the same batch", () => {
+    // 2026-10-14: 8 adds, a group, then a set_format in another call, rejected on a member.
+    const r = applyOps(canon(), [
+      { op: "add", type: "comb", page: 1, cells: dateCells(), label: "Date of birth", ref: "dob" },
+      { op: "set_format", id: "$dob", format: { date_format: "DDMMYYYY" } },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const gid = r.diff_summary.added[0].id;
+    const c = combOf(r.render, gid);
+    expect(c).toMatchObject({
+      kind: "comb",
+      label: "Date of birth",
+      cell_type: "date",
+      date_format: "DDMMYYYY",
+    });
+    expect(c.cells).toHaveLength(8);
+    expect(c.cells.every((f) => f.label === "" && f.type === "text" && f.group === gid)).toBe(true);
+    expect(r.diff_summary.ops[0].members).toEqual(c.members);
+    expect(r.diff_summary.ops[1].comb).toEqual({
+      cell_type: "date",
+      date_format: "DDMMYYYY",
+      max_length: 8,
+    });
+    expect(r.diff_summary.ops[0].section).toEqual({ id: "sec-1", title: "Personal details" });
+    expect(schemaIssues(r.render)).toEqual([]);
+  });
+
+  it("cuts an outer box into equal cells, with the cell type and date format given", () => {
+    const r = applyOps(canon(), [
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        box: { x: 0.5, y: 0.9, w: 0.4, h: 0.03 },
+        cells: 4,
+        label: "PIN",
+        cell_type: "integer",
+      },
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        box: { x: 0.1, y: 0.95, w: 0.2, h: 0.03 },
+        cells: 4,
+        label: "Day",
+        date_format: "DDMM",
+      },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const pin = combOf(r.render, r.diff_summary.added[0].id);
+    expect(pin.cell_type).toBe("integer");
+    expect(pin.cells.map((f) => round2(f.xpct))).toEqual([50, 60, 70, 80]);
+    expect(pin.cells.every((f) => round2(f.wpct) === 10)).toBe(true);
+    expect(combOf(r.render, r.diff_summary.added[1].id)).toMatchObject({
+      cell_type: "date",
+      date_format: "DDMM",
+    });
+    const bad = applyOps(canon(), [
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        box: { x: 0.5, y: 0.9, w: 0.4, h: 0.03 },
+        cells: 4,
+        label: "X",
+        date_format: "DDMMYY",
+      },
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        box: { x: 0.5, y: 0.9, w: 0.4, h: 0.03 },
+        cells: 1,
+        label: "X",
+      },
+    ]);
+    expect(bad.rejected.map((x) => x.reason)).toEqual([
+      expect.stringMatching(/one letter \(D, M or Y\) per cell: this comb has 4 cells/),
+      expect.stringMatching(/cells is the number of printed cells/),
+    ]);
+  });
+
+  it("turns a field into a comb over its box, keeping its label, section, order and required", () => {
+    const s = applyOps(canon(), [
+      { op: "set_required", id: "f-date", required: true },
+      { op: "reorder", page: 1, ids: ["f-date", "f-text"] },
+    ]).render;
+    const before = field(s, "f-date");
+    const r = applyOps(s, [
+      { op: "retype", id: "f-date", type: "comb", cells: 8, ref: "c" },
+      {
+        op: "set_description",
+        id: "$c",
+        description: "As on your passport",
+      },
+    ]);
+    expect(r.rejected).toEqual([]);
+    expect(r.render.fields.find((f) => f.id === "f-date")).toBeUndefined();
+    const gid = r.diff_summary.added[0].id;
+    const c = combOf(r.render, gid) as ReturnType<typeof combOf> & Record<string, unknown>;
+    // A date field's DD/MM/YYYY (its default) gives the comb DDMMYYYY.
+    expect(c).toMatchObject({
+      label: "Date of birth",
+      required: true,
+      cell_type: "date",
+      date_format: "DDMMYYYY",
+      order: before.order,
+      description: "As on your passport",
+    });
+    expect(c.cells.every((f) => f.section_id === before.section_id)).toBe(true);
+    expect(c.cells[0].xpct).toBeCloseTo(before.xpct as number);
+    expect(r.diff_summary.deleted).toEqual(["f-date"]);
+    expect(schemaIssues(r.render)).toEqual([]);
+  });
+
+  it('keeps a date field\'s format when the retype passes cell_type "date"', () => {
+    const r = applyOps(canon(), [
+      { op: "retype", id: "f-date", type: "comb", cells: 8, cell_type: "date" },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const c = combOf(r.render, r.diff_summary.added[0].id) as Record<string, unknown>;
+    expect(c).toMatchObject({ cell_type: "date", date_format: "DDMMYYYY" });
+    expect(schemaIssues(r.render)).toEqual([]);
+  });
+
+  it("adds and removes a cell, keeping a date comb's date_format in step", () => {
+    const made = applyOps(canon(), [
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        cells: dateCells().slice(0, 6),
+        label: "Born",
+        date_format: "DDMMYY",
+      },
+    ]);
+    const gid = made.diff_summary.added[0].id;
+    const box = { x: 0.8, y: 0.9, w: 0.025, h: 0.03 };
+    const r = applyOps(made.render, [
+      { op: "comb_add_cell", id: gid, box, date_format: null },
+      { op: "comb_add_cell", id: gid, box },
+      { op: "comb_add_cell", id: gid, box, date_format: "DDMMYYY" },
+    ]);
+    // Left out or null, a date comb's date_format is not kept in step: refused.
+    const stale = /date comb \(date_format DDMMYY.*pass date_format for its 7 cells/;
+    expect(r.rejected).toEqual([
+      { op_index: 0, reason: expect.stringMatching(stale) },
+      { op_index: 1, reason: expect.stringMatching(stale) },
+    ]);
+    const cell = r.diff_summary.added[0].id;
+    expect(combOf(r.render, gid)).toMatchObject({ date_format: "DDMMYYY" });
+    expect(r.diff_summary.ops[0].comb).toMatchObject({ max_length: 7 });
+    const back = applyOps(r.render, [{ op: "comb_remove_cell", id: cell, date_format: "DDMMYY" }]);
+    expect(back.rejected).toEqual([]);
+    expect(combOf(back.render, gid).cells).toHaveLength(6);
+    expect(back.render.fields.find((f) => f.id === cell)).toBeUndefined();
+    // An integer comb needs no format; a comb keeps two cells.
+    const pin = applyOps(canon(), [
+      {
+        op: "add",
+        type: "comb",
+        page: 1,
+        cells: dateCells().slice(0, 2),
+        label: "N",
+        cell_type: "integer",
+      },
+    ]);
+    const two = combOf(pin.render, pin.diff_summary.added[0].id);
+    expect(
+      applyOps(pin.render, [{ op: "comb_remove_cell", id: two.members[0] }]).rejected[0].reason,
+    ).toMatch(/at least 2 cells/);
+  });
+
+  it("group takes a comb's typing, and set_format on a cell applies to its comb", () => {
+    const r = applyOps(canon(), [
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.5, y: 0.9, w: 0.03, h: 0.03 },
+        label: "",
+        ref: "a",
+      },
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.53, y: 0.9, w: 0.03, h: 0.03 },
+        label: "",
+        ref: "b",
+      },
+      { op: "group", kind: "comb", ids: ["$a", "$b"], label: "Month", date_format: "MM", ref: "m" },
+      { op: "set_format", id: "$a", format: { cell_type: "integer" } },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const gid = r.diff_summary.added[2].id;
+    expect(r.diff_summary.ops[2].comb).toEqual({
+      cell_type: "date",
+      date_format: "MM",
+      max_length: 2,
+    });
+    expect(group(r.render, gid)).toMatchObject({ cell_type: "integer" });
+    expect(r.warnings.join(" ")).toMatch(/takes its comb's format; applied to comb/);
+  });
+
+  it("refuses an unknown ref, a taken one, and a ref on an op that adds nothing", () => {
+    const r = applyOps(canon(), [
+      { op: "relabel", id: "$nope", label: "x" },
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.5, y: 0.9, w: 0.03, h: 0.03 },
+        label: "A",
+        ref: "a",
+      },
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.6, y: 0.9, w: 0.03, h: 0.03 },
+        label: "B",
+        ref: "a",
+      },
+      { op: "relabel", id: "$a", label: "A2", ref: "x" },
+      {
+        op: "add",
+        page: 1,
+        type: "text",
+        box: { x: 0.6, y: 0.9, w: 0.03, h: 0.03 },
+        label: "C",
+        ref: "9bad",
+      },
+    ]);
+    expect(r.rejected.map((x) => [x.op_index, x.reason])).toEqual([
+      [0, expect.stringMatching(/no earlier op of this batch made "nope"/)],
+      [2, expect.stringMatching(/already taken/)],
+      [3, expect.stringMatching(/this op adds nothing/)],
+      [4, expect.stringMatching(/ref names what this op adds/)],
+    ]);
+  });
+
+  it("snaps on the page of what a ref names", () => {
+    const ops = [
+      {
+        op: "add",
+        page: 2,
+        type: "text",
+        box: { x: 0.1, y: 0.1, w: 0.2, h: 0.02 },
+        label: "A",
+        ref: "a",
+      },
+      { op: "set_box", id: "$a", x: 0.1, y: 0.2, w: 0.2, h: 0.02, snap: "underline" },
+    ];
+    expect(snapPages(ops, () => undefined)).toEqual([2]);
   });
 });
 
@@ -567,6 +869,39 @@ describe("EchoGuard", () => {
         .map((w) => `${w.id}:${w.prop}`)
         .sort(),
     ).toEqual(["f-date:format.date_format", "f-text:label"]);
+  });
+
+  it("wordingOf marks a comb cell's label quiet: no warning for a short answer, refused for a longer one", () => {
+    // canonical's comb has one member over four cells; its label is never shown.
+    const labels = wordingOf(canon()).filter((w) => w.prop === "label");
+    expect(labels.find((w) => w.id === "f-comb")).toMatchObject({ text: "PESEL", quiet: true });
+    expect(labels.find((w) => w.id === "f-text")?.quiet).toBeUndefined();
+    const g = new EchoGuard();
+    g.remember(canon(), { "f-text": "PESEL" });
+    // Equal to a 5-character answer: refused on a comb cell as on a field.
+    expect(g.check(labels.filter((w) => w.id === "f-comb")).refuse).toEqual(["f-comb"]);
+    for (const answer of ["SW1A", "1234"]) {
+      const h = new EchoGuard();
+      h.remember(canon(), { "f-text": answer });
+      expect(h.check([{ id: "f-comb", prop: "label", text: answer, quiet: true }]).refuse).toEqual([
+        "f-comb",
+      ]);
+    }
+    // A placeholder equal to an answer too short to refuse: no warning on a
+    // comb cell, a warning on a label people see.
+    const d = new EchoGuard();
+    d.remember(canon(), { "f-text": "D1" });
+    const quiet = d.check([{ id: "f-comb", prop: "label", text: "D1", quiet: true }]);
+    expect(quiet.refuse).toEqual([]);
+    expect(quiet.warn).toEqual([]);
+    expect(d.check([{ id: "f-text", prop: "label", text: "D1" }]).warn).toEqual(["f-text"]);
+    g.remember(canon(), { "f-text": "Kowalska-Sentinel 77" });
+    const r = applyOps(
+      canon(),
+      [{ op: "relabel", id: "f-comb", label: "Kowalska-Sentinel 77" }],
+      (w) => g.check(w),
+    );
+    expect(r.rejected).toHaveLength(1);
   });
 
   it("wordingOf lists labels, descriptions, placeholders, options and section titles", () => {

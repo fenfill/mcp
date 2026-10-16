@@ -89,13 +89,22 @@ export interface Region {
   h: number;
 }
 
+/** A box in a page's own user space, in points, bottom-left origin. */
+export interface PointBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 type Module = Pdfium;
 
-/** Open one page (1-based) of an in-memory PDF, run `fn`, and free everything. */
-async function withPage<T>(
+type Heap = () => Uint8Array;
+
+/** Open an in-memory PDF, run `fn` with it, and free everything. */
+async function withDoc<T>(
   pdf: Uint8Array,
-  page: number,
-  fn: (m: Module, pg: number, heap: () => Uint8Array) => T,
+  fn: (m: Module, doc: number, heap: Heap) => T | Promise<T>,
 ): Promise<T> {
   const m = await pdfium();
   const p = m.pdfium;
@@ -105,7 +114,6 @@ async function withPage<T>(
   const ptr = p.wasmExports.malloc(pdf.length);
   if (!ptr) throw new ToolError("render_failed", "Not enough memory to render this page.");
   let doc = 0;
-  let pg = 0;
   try {
     heap().set(pdf, ptr);
     doc = m.FPDF_LoadMemDocument(ptr, pdf.length, "");
@@ -114,20 +122,43 @@ async function withPage<T>(
         hint: "Use fill_form with check_pdf instead and open the .check.pdf.",
       });
     }
-    const count = m.FPDF_GetPageCount(doc);
-    if (page < 1 || page > count) {
-      throw new ToolError("invalid_page", `The PDF has ${String(count)} pages.`, {
-        hint: `Pass page between 1 and ${String(count)}.`,
-      });
-    }
-    pg = m.FPDF_LoadPage(doc, page - 1);
-    if (!pg) throw new ToolError("render_failed", "The page renderer couldn't load this page.");
-    return fn(m, pg, heap);
+    return await fn(m, doc, heap);
   } finally {
-    if (pg) m.FPDF_ClosePage(pg);
     if (doc) m.FPDF_CloseDocument(doc);
     p.wasmExports.free(ptr);
   }
+}
+
+/** Load one page (1-based) of an open document, run `fn`, and close the page. */
+function onPage<T>(
+  m: Module,
+  doc: number,
+  page: number,
+  heap: Heap,
+  fn: (m: Module, pg: number, heap: Heap) => T,
+): T {
+  const count = m.FPDF_GetPageCount(doc);
+  if (page < 1 || page > count) {
+    throw new ToolError("invalid_page", `The PDF has ${String(count)} pages.`, {
+      hint: `Pass page between 1 and ${String(count)}.`,
+    });
+  }
+  const pg = m.FPDF_LoadPage(doc, page - 1);
+  if (!pg) throw new ToolError("render_failed", "The page renderer couldn't load this page.");
+  try {
+    return fn(m, pg, heap);
+  } finally {
+    m.FPDF_ClosePage(pg);
+  }
+}
+
+/** Open one page (1-based) of an in-memory PDF, run `fn`, and free everything. */
+function withPage<T>(
+  pdf: Uint8Array,
+  page: number,
+  fn: (m: Module, pg: number, heap: Heap) => T,
+): Promise<T> {
+  return withDoc(pdf, (m, doc, heap) => onPage(m, doc, page, heap, fn));
 }
 
 /**
@@ -187,45 +218,167 @@ export async function renderPage(
   });
 }
 
+export interface Glyph extends Region {
+  char: string;
+  /** Its index in the page's text: a gap between two glyphs' indices is a space or a line break. */
+  i: number;
+  /** How dark it prints on white paper, 0 (black) to 255 (white), its fill's
+   *  opacity counted; null when PDFium can't tell. Invisible text (an OCR layer
+   *  over a scan) keeps its fill's: it stands for the print under it. */
+  lum: number | null;
+}
+
 export interface PageText {
   widthPt: number;
   heightPt: number;
-  /** Printed glyph boxes (whitespace skipped), fractions of the page, top-left origin. */
-  glyphs: (Region & { char: string })[];
+  /** Printed glyph boxes (whitespace skipped), fractions of the page as shown
+   *  (rotated and cropped, as rendered), top-left origin. */
+  glyphs: Glyph[];
+  /** The same glyphs (index for index) in the page's own user space, in
+   *  points (unrotated, uncropped): where pdf-lib, and so the check copy,
+   *  draws. */
+  own: { left: number; bottom: number; right: number; top: number }[];
+}
+
+/**
+ * Each PDF's pages read so far, by its bytes: preview_page reads one page's
+ * text for the tags, the placement checks and the stamped sizes, and a fill
+ * with a check copy reads every page. Weak: gone with the bytes. A failed read
+ * is not kept. Callers never change a PageText they are given.
+ */
+const textMemo = new WeakMap<Uint8Array, Map<number, Promise<PageText>>>();
+
+function memoOf(pdf: Uint8Array): Map<number, Promise<PageText>> {
+  let byPage = textMemo.get(pdf);
+  if (!byPage) {
+    byPage = new Map();
+    textMemo.set(pdf, byPage);
+  }
+  return byPage;
 }
 
 /** The page's size in points and its text layer's glyph boxes (none on a scan). */
-export async function pageText(pdf: Uint8Array, page: number): Promise<PageText> {
-  return withPage(pdf, page, (m, pg, heap) => {
-    const widthPt = m.FPDF_GetPageWidthF(pg);
-    const heightPt = m.FPDF_GetPageHeightF(pg);
-    const glyphs: PageText["glyphs"] = [];
-    const tp = m.FPDFText_LoadPage(pg);
-    if (!tp) return { widthPt, heightPt, glyphs };
-    const p = m.pdfium;
-    const out = p.wasmExports.malloc(32);
-    try {
-      const n = m.FPDFText_CountChars(tp);
-      for (let i = 0; i < n; i++) {
-        const u = m.FPDFText_GetUnicode(tp, i);
-        if (u <= 32 || u === 0xa0 || u === 0xfffe || u === 0xffff) continue;
-        if (!m.FPDFText_GetCharBox(tp, i, out, out + 8, out + 16, out + 24)) continue;
-        const [left, right, bottom, top] = new Float64Array(heap().buffer, out, 4);
-        if (!(right > left) || !(top > bottom)) continue;
-        glyphs.push({
-          x: left / widthPt,
-          y: (heightPt - top) / heightPt, // PDF space is bottom-left: invert Y
-          w: (right - left) / widthPt,
-          h: (top - bottom) / heightPt,
-          char: String.fromCodePoint(u),
-        });
-      }
-    } finally {
-      p.wasmExports.free(out);
-      m.FPDFText_ClosePage(tp);
+export function pageText(pdf: Uint8Array, page: number): Promise<PageText> {
+  const byPage = memoOf(pdf);
+  let text = byPage.get(page);
+  if (!text) {
+    text = withPage(pdf, page, readText);
+    byPage.set(page, text);
+    text.catch(() => byPage.delete(page));
+  }
+  return text;
+}
+
+/** pageText of an open page. */
+function readText(m: Module, pg: number, heap: Heap): PageText {
+  const widthPt = m.FPDF_GetPageWidthF(pg);
+  const heightPt = m.FPDF_GetPageHeightF(pg);
+  const glyphs: PageText["glyphs"] = [];
+  const own: PageText["own"] = [];
+  const tp = m.FPDFText_LoadPage(pg);
+  if (!tp) return { widthPt, heightPt, glyphs, own };
+  const p = m.pdfium;
+  const out = p.wasmExports.malloc(32);
+  const rgba = p.wasmExports.malloc(16);
+  const dev = p.wasmExports.malloc(8);
+  // A char box is in the page's own space (unrotated, from the MediaBox's
+  // origin); the page as shown is rotated and cropped. PDFium maps a point
+  // to the shown page, top-left origin, in whole device units: a device of
+  // DEV units per point keeps it to 1/DEV pt.
+  const DEV = 64;
+  const devW = Math.max(1, Math.round(widthPt * DEV));
+  const devH = Math.max(1, Math.round(heightPt * DEV));
+  const shown = (x: number, y: number): [number, number] => {
+    m.FPDF_PageToDevice(pg, 0, 0, devW, devH, 0, x, y, dev, dev + 4);
+    const [dx, dy] = new Int32Array(heap().buffer, dev, 2);
+    return [dx / devW, dy / devH];
+  };
+  try {
+    if (!out || !rgba || !dev) {
+      throw new ToolError("render_failed", "Not enough memory to read this page's text.");
     }
-    return { widthPt, heightPt, glyphs };
-  });
+    const n = m.FPDFText_CountChars(tp);
+    for (let i = 0; i < n; i++) {
+      const u = m.FPDFText_GetUnicode(tp, i);
+      if (u <= 32 || u === 0xa0 || u === 0xfffe || u === 0xffff) continue;
+      if (!m.FPDFText_GetCharBox(tp, i, out, out + 8, out + 16, out + 24)) continue;
+      const [left, right, bottom, top] = new Float64Array(heap().buffer, out, 4);
+      if (!(right > left) || !(top > bottom)) continue;
+      let lum: number | null = null;
+      if (m.FPDFText_GetFillColor(tp, i, rgba, rgba + 4, rgba + 8, rgba + 12)) {
+        const [r, g, b, a] = new Uint32Array(heap().buffer, rgba, 4);
+        // On white paper: the fill blended with white by its opacity.
+        lum = 255 - (255 - (0.299 * r + 0.587 * g + 0.114 * b)) * (a / 255);
+      }
+      const [ax, ay] = shown(left, top);
+      const [bx, by] = shown(right, bottom);
+      glyphs.push({
+        x: Math.min(ax, bx),
+        y: Math.min(ay, by),
+        w: Math.abs(bx - ax),
+        h: Math.abs(by - ay),
+        char: String.fromCodePoint(u),
+        i,
+        lum,
+      });
+      own.push({ left, bottom, right, top });
+    }
+  } finally {
+    if (out) p.wasmExports.free(out);
+    if (rgba) p.wasmExports.free(rgba);
+    if (dev) p.wasmExports.free(dev);
+    m.FPDFText_ClosePage(tp);
+  }
+  return { widthPt, heightPt, glyphs, own };
+}
+
+/**
+ * The printed glyph boxes of each of `pages` in the space the check copy draws
+ * in (each page's own user space, in points, bottom-left origin: pdf-lib's,
+ * whatever the page's rotation, crop or inherited boxes), for its id tags to
+ * keep off. A page the renderer can't read (or a missing renderer) gives none:
+ * the tags then avoid only the outlines and the stamped values.
+ */
+export async function printedBoxes(
+  pdf: Uint8Array,
+  pages: Iterable<number>,
+): Promise<Record<number, PointBox[]>> {
+  const out: Record<number, PointBox[]> = {};
+  const wanted = [...new Set(pages)];
+  const byPage = memoOf(pdf);
+  // The pages not read yet, from one load of the document (a read already
+  // under way is kept: it settles its own entry).
+  if (wanted.some((page) => !byPage.has(page))) {
+    try {
+      await withDoc(pdf, (m, doc, heap) => {
+        for (const page of wanted) {
+          if (byPage.has(page)) continue;
+          try {
+            byPage.set(page, Promise.resolve(onPage(m, doc, page, heap, readText)));
+          } catch {
+            // no text layer to avoid on this page
+          }
+        }
+      });
+    } catch {
+      // no renderer, or a PDF it can't open: no text to avoid
+    }
+  }
+  for (const page of wanted) {
+    const text = byPage.get(page);
+    if (!text) continue;
+    try {
+      out[page] = (await text).own.map((g) => ({
+        x: g.left,
+        y: g.bottom,
+        w: g.right - g.left,
+        h: g.top - g.bottom,
+      }));
+    } catch {
+      // no text layer to avoid on this page
+    }
+  }
+  return out;
 }
 
 // ---- PNG -----------------------------------------------------------------------------------

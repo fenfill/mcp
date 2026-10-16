@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import { EchoGuard } from "../src/echo.js";
+import { legendRows } from "../src/preview.js";
 import type { RenderSchema } from "../src/types.js";
 import { expandValueKeys } from "../src/values.js";
 import { fixture } from "./helpers.js";
@@ -47,16 +48,19 @@ const LINE_ITEM = "ea8e75d9-0be0-50f7-9928-26cc1f09bc8b";
 const LINE_PAID = "1b245c20-c312-51f7-bb03-f3dea8c6f912";
 
 describe("expandValueKeys", () => {
-  it("writes an unambiguous prefix of 6+ characters out in full, in the order given", () => {
+  it("writes an unambiguous prefix of 4+ characters out in full, in the order given", () => {
     const out = expandValueKeys(three(), { bbbbbb: "c", "aaaaaa01-f": "a" });
     expect(Object.entries(out)).toEqual([
       ["bbbbbb02-third", "c"],
       ["aaaaaa01-first", "a"],
     ]);
+    // 0.2.2 took only 6+ ("only the 6-character legend tags worked"); any case.
+    expect(expandValueKeys(three(), { bbbbb: 1 })).toEqual({ "bbbbbb02-third": 1 });
+    expect(expandValueKeys(three(), { BBBB: 1 })).toEqual({ "bbbbbb02-third": 1 });
   });
 
   it("leaves a key that is too short, ambiguous or unknown as typed", () => {
-    const given = { bbbbb: 1, aaaaaa01: 2, "zzzzzzzz-nope": 3, "aaaaaa01-second": 4 };
+    const given = { bbb: 1, aaaaaa01: 2, "zzzzzzzz-nope": 3, "aaaaaa01-second": 4 };
     expect(expandValueKeys(three(), given)).toEqual(given);
   });
 
@@ -83,6 +87,106 @@ describe("expandValueKeys", () => {
         cbbe0368: [{ ea8e75d9: "Pens", "1b245c20": true }, { Item: "Ink" }],
       }),
     ).toEqual({ [LINES]: [{ [LINE_ITEM]: "Pens", [LINE_PAID]: true }, { Item: "Ink" }] });
+  });
+
+  it("moves a table cell given at the top level into its table's value", () => {
+    const table = fixture("classic_tables").render;
+    // The 2026-10-14 notes: {"524cb7": "X1"} was "unknown id".
+    expect(expandValueKeys(table, { ffb3a3: "Ann" })).toEqual({
+      [CHILDREN]: { [CHILD_NAME]: "Ann" },
+    });
+    // Merged into the table's own value, after it.
+    expect(
+      expandValueKeys(table, { ffb3a3e7: "Ann", "391f4376": { b8e28281: "2020-01-02" } }),
+    ).toEqual({ [CHILDREN]: { [CHILD_BORN]: "2020-01-02", [CHILD_NAME]: "Ann" } });
+    // The same cell given twice: the top-level one is left for the core to report.
+    expect(expandValueKeys(table, { [CHILD_NAME]: "Ann", "391f4376": { ffb3a3e7: "Bo" } })).toEqual(
+      { [CHILD_NAME]: "Ann", [CHILDREN]: { [CHILD_NAME]: "Bo" } },
+    );
+  });
+
+  it("makes an option given true its group's value", () => {
+    const canon = fixture("canonical").render;
+    expect(expandValueKeys(canon, { "f-checkbox2": true })).toEqual({ "g-choice": "f-checkbox2" });
+    // false or null: left blank.
+    expect(expandValueKeys(canon, { "f-checkbox2": false, "f-checkbox": null })).toEqual({});
+    // A radio given both ways: the option is left as typed for the core to report.
+    expect(expandValueKeys(canon, { "g-choice": "Yes", "f-checkbox2": true })).toEqual({
+      "g-choice": "Yes",
+      "f-checkbox2": true,
+    });
+    // A multiselect gathers its options, after any list given for it.
+    const multi = JSON.parse(JSON.stringify(canon)) as RenderSchema;
+    (multi.groups as { id: string; format?: string }[]).find((g) => g.id === "g-choice")!.format =
+      "multiple";
+    expect(expandValueKeys(multi, { "f-checkbox2": true, "f-checkbox": true })).toEqual({
+      "g-choice": ["f-checkbox2", "f-checkbox"],
+    });
+    expect(expandValueKeys(multi, { "g-choice": "Yes", "f-checkbox2": true })).toEqual({
+      "g-choice": ["Yes", "f-checkbox2"],
+    });
+  });
+
+  it("takes the tags the legend shows, though an entry's tag also starts a comb cell's id", () => {
+    // The legend's 6-character tags are unique among the tagged ids (entries,
+    // options, table cells); comb cells get longer tags, unique among all.
+    const cell = (id: string, x: number) => ({
+      ...fld(id, 50),
+      xpct: x,
+      wpct: 3,
+      group: "zzzzzzzz-comb",
+    });
+    const s = {
+      ...three(),
+      fields: [fld("abcdef01-entry", 10), cell("abcdef02-cell1", 10), cell("abcdef02-cell2", 13)],
+      groups: [
+        {
+          id: "zzzzzzzz-comb",
+          kind: "comb",
+          page: 1,
+          label: "Code",
+          members: ["abcdef02-cell1", "abcdef02-cell2"],
+        },
+      ],
+    } as unknown as RenderSchema;
+    const legend = legendRows(s, 1);
+    const entryTag = legend.find((r) => r.id === "abcdef01-entry")!.tag;
+    const cellTag = legend.find((r) => r.id === "zzzzzzzz-comb")!.comb_cells![0].tag;
+    expect(entryTag).toBe("abcdef");
+    expect(cellTag).toBe("abcdef02-cell1");
+    expect(expandValueKeys(s, { [entryTag]: "x" })).toEqual({ "abcdef01-entry": "x" });
+    // A prefix of a comb cell's id that starts no tagged id is written out too
+    // (the core then reports it as a cell of its comb).
+    expect(expandValueKeys(s, { "abcdef02-cell1": 1 })).toEqual({ "abcdef02-cell1": 1 });
+    expect(expandValueKeys(s, { "ABCDEF02-CELL2": 1 })).toEqual({ "abcdef02-cell2": 1 });
+    // A prefix that starts two comb cells stays as typed.
+    expect(expandValueKeys(s, { abcdef02: 1 })).toEqual({ abcdef02: 1 });
+  });
+
+  it("takes a comb cell's legend tag that also starts an expandable table's printed-row id", () => {
+    // A comb cell's tag is made unique among the tagged ids and the comb cells,
+    // not an expandable table's printed rows (6a3d06e1-… is one).
+    const s = JSON.parse(JSON.stringify(fixture("expandable_tables").render)) as RenderSchema;
+    const page = (s.fields[0] as { page: number }).page;
+    const cell = (id: string, x: number) => ({
+      ...fld(id, 95),
+      page,
+      section_id: s.fields[0].section_id,
+      xpct: x,
+      wpct: 3,
+      group: "zzzzzzzz-comb",
+    });
+    s.fields.push(cell("6a3d06e1-comb-0", 10) as never, cell("yyyyyyyy-comb-1", 13) as never);
+    s.groups.push({
+      id: "zzzzzzzz-comb",
+      kind: "comb",
+      page,
+      label: "Code",
+      members: ["6a3d06e1-comb-0", "yyyyyyyy-comb-1"],
+    } as never);
+    const tag = legendRows(s, page).find((r) => r.id === "zzzzzzzz-comb")!.comb_cells![0].tag;
+    expect(tag).toBe("6a3d06");
+    expect(expandValueKeys(s, { [tag]: 1 })).toEqual({ "6a3d06e1-comb-0": 1 });
   });
 
   it("keeps every key an own key, whatever it is named", () => {
@@ -116,6 +220,13 @@ describe("the echo guard sees the keys the stamp sees", () => {
     expect(before.size).toBe(0);
     const g = new EchoGuard();
     g.remember(rows, expandValueKeys(rows, short));
+    expect(hit(g)).toEqual(["x"]);
+  });
+
+  it("remembers a table cell given at the top level once it is moved into its table", () => {
+    const table = fixture("classic_tables").render;
+    const g = new EchoGuard();
+    g.remember(table, expandValueKeys(table, { ffb3a3e7: SECRET }));
     expect(hit(g)).toEqual(["x"]);
   });
 

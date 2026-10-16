@@ -545,6 +545,19 @@ function editDistance(a: string, b: string): number {
   return prev[b.length];
 }
 
+/** The shortest id prefix a value key (or an option id in a value) is taken as. */
+export const MIN_VALUE_PREFIX = 4;
+
+/** The ids among `ids` that `key` is a prefix of (case-insensitive), when it is long enough. */
+export function prefixHits(key: string, ids: Iterable<string>): string[] {
+  const lk = key.toLowerCase();
+  if (lk.length < MIN_VALUE_PREFIX) return [];
+  return [...new Set([...ids].filter((id) => id.toLowerCase().startsWith(lk)))];
+}
+
+const ambiguous = (hits: string[]): string =>
+  `ambiguous: it starts ${String(hits.length)} ids; give more characters`;
+
 // Ids to suggest for an unknown key among `items`: exact (normalized) label
 // matches, then id prefixes, then the nearest ids by edit distance.
 function suggestIds(key: string, items: readonly { id: string; label: string }[]): string[] {
@@ -555,7 +568,11 @@ function suggestIds(key: string, items: readonly { id: string; label: string }[]
   const nk = normLabel(key);
   if (nk) for (const it of items) if (normLabel(it.label) === nk) add(it.id);
   const lk = key.toLowerCase();
-  if (lk.length >= 4) for (const it of items) if (it.id.toLowerCase().startsWith(lk)) add(it.id);
+  for (const id of prefixHits(
+    key,
+    items.map((it) => it.id),
+  ))
+    add(id);
   if (lk.length <= 64) {
     const limit = Math.max(2, Math.floor(lk.length / 4));
     items
@@ -660,6 +677,10 @@ function matchOption(options: Field[], raw: unknown, groupLabel = ""): OptionMat
       suggestions: bare,
     };
   }
+  // A shortened option id, as the preview's legend tags show it.
+  const pre = prefixHits(v, ids);
+  if (pre.length === 1) return { id: pre[0] };
+  if (pre.length > 1) return { reason: ambiguous(pre), suggestions: pre.slice(0, 5) };
   const labels = options.map((o) => JSON.stringify(labelOf(o))).join(", ");
   return { reason: `no option has this id or label (options: ${labels})`, suggestions: ids };
 }
@@ -702,19 +723,42 @@ interface Mapped extends AgentValuesResult {
 
 const MAX_SUGGESTED = 50;
 
-// Every id nested inside an entry (options, comb cells, table cells, columns),
-// so an agent passing one at the top level is told where it belongs.
-function nestedOwners(entries: AgentEntry[]): Map<string, { what: string; owner: AgentEntry }> {
-  const out = new Map<string, { what: string; owner: AgentEntry }>();
-  const put = (id: string, what: string, owner: AgentEntry) => {
-    if (!out.has(id)) out.set(id, { what, owner });
+/** What a nested id is in its entry: `kind` says where a value given under it
+ *  belongs (an option or a classic table's cell can be moved there; a column
+ *  or any other member is only named), `what` says it to the agent. */
+export interface NestedOwner {
+  kind: "option" | "cell" | "column" | "member";
+  what: string;
+  owner: AgentEntry;
+}
+
+/**
+ * Every id nested inside an entry (options, table cells, columns, then every
+ * other member: comb cells, an expandable table's printed rows), so an agent
+ * passing one at the top level is told where it belongs. The one definition
+ * the MCP's value-key expansion (packages/mcp/src/values.ts) also reads.
+ */
+export function nestedIdOwners(entries: readonly AgentEntry[]): Map<string, NestedOwner> {
+  const out = new Map<string, NestedOwner>();
+  const put = (id: string, kind: NestedOwner["kind"], what: string, owner: AgentEntry) => {
+    if (!out.has(id)) out.set(id, { kind, what, owner });
   };
   for (const e of entries) {
-    if (e.kind === "choice") for (const o of e.options) put(o.id, "an option", e);
-    if (e.kind === "table_rows") for (const c of e.columns) put(c.id, "a column", e);
-    if (e.kind !== "field") for (const m of e.members) put(m.id, "a cell", e);
+    if (e.kind === "field") continue;
+    if (e.kind === "choice") for (const o of e.options) put(o.id, "option", "an option", e);
+    if (e.kind === "table") for (const c of e.cells) put(c.id, "cell", "a cell", e);
+    if (e.kind === "table_rows") for (const c of e.columns) put(c.id, "column", "a column", e);
+    for (const m of e.members) put(m.id, "member", "a cell", e);
   }
   return out;
+}
+
+/** The entry a nested id (or a unique prefix of one) belongs to. */
+function nestedOwner(owners: Map<string, NestedOwner>, key: string): NestedOwner | undefined {
+  const exact = owners.get(key);
+  if (exact) return exact;
+  const hits = prefixHits(key, owners.keys());
+  return hits.length === 1 ? owners.get(hits[0]) : undefined;
 }
 
 function mapInternal(
@@ -725,7 +769,7 @@ function mapInternal(
   if (!isRecord(input)) throw new TypeError("values must be an object keyed by agent id");
   const entries = agentEntries(schema);
   const byId = new Map(entries.map((e) => [e.id, e] as const));
-  let owners: Map<string, { what: string; owner: AgentEntry }> | null = null;
+  let owners: Map<string, NestedOwner> | null = null;
   const out: Mapped = {
     values: {},
     rowCounts: {},
@@ -809,7 +853,15 @@ function mapInternal(
           const sid = `${e.id}.${cellId}`;
           const cell = e.cells.find((c) => c.id === cellId);
           if (!cell) {
-            skip(sid, "not a cell of this table", suggestIds(cellId, e.cells));
+            owners ??= nestedIdOwners(entries);
+            const own = nestedOwner(owners, cellId);
+            skip(
+              sid,
+              own && own.owner.id !== e.id
+                ? `not a cell of this table: it is ${own.what} of "${own.owner.label}" (${own.owner.id})`
+                : "not a cell of this table",
+              suggestIds(cellId, e.cells),
+            );
             continue;
           }
           if (v === null || v === undefined) continue;
@@ -880,13 +932,32 @@ function mapInternal(
   for (const [key, raw] of Object.entries(input)) {
     const e = byId.get(key);
     if (!e) {
-      owners ??= nestedOwners(entries);
-      const own = owners.get(key);
+      owners ??= nestedIdOwners(entries);
+      // Exact, or a unique prefix among every id (an entry's id counts too).
+      const hits = owners.has(key) ? [] : prefixHits(key, [...byId.keys(), ...owners.keys()]);
+      const own = owners.get(key) ?? (hits.length === 1 ? owners.get(hits[0]) : undefined);
       if (own) {
+        // A prefix is named in full: the core matches ids exactly.
+        const full = owners.has(key) ? key : hits[0];
+        const what = full === key ? own.what : `${own.what} (${full})`;
         skip(
           key,
-          `not a top-level id: this is ${own.what} of "${own.owner.label}" (${own.owner.id}); pass it inside that entry's value`,
-          [own.owner.id],
+          own.what === "an option"
+            ? `not a top-level id: this is ${what} of "${own.owner.label}" (${own.owner.id}); pass it as that group's value, or give it alone with true (a radio takes one option)`
+            : `not a top-level id: this is ${what} of "${own.owner.label}" (${own.owner.id}); pass it inside that entry's value`,
+          full === key ? [own.owner.id] : [own.owner.id, full],
+        );
+      } else if (hits.length > 1) {
+        skip(key, ambiguous(hits), hits.slice(0, 5));
+      } else if (hits.length === 1) {
+        // A unique prefix of an entry's id that reached here unexpanded: the
+        // MCP writes a prefix out unless its full id is given too.
+        skip(
+          key,
+          Object.prototype.hasOwnProperty.call(input, hits[0])
+            ? `a short id of ${hits[0]}, which is given too: give each entry once`
+            : `unknown id: did you mean ${hits[0]}? give the full id`,
+          hits,
         );
       } else {
         skip(key, "unknown id", suggested++ < MAX_SUGGESTED ? suggestIds(key, entries) : undefined);
@@ -1153,13 +1224,107 @@ async function buildCheckPdf(
   fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
   banner = true,
   tags = true,
+  avoid: TagObstacles = {},
 ): Promise<{ pdf: Uint8Array; notes: string[] }> {
   const at: CheckStep = { stage: "load" };
   try {
-    return await drawCheckPdf(stamped, entries, status, fonts, banner, tags, at);
+    return await drawCheckPdf(stamped, entries, status, fonts, banner, tags, avoid, at);
   } catch (e) {
     throw new CheckCopyError(at, e);
   }
+}
+
+/** A box in the page's own user space, in points: bottom-left origin,
+ *  unrotated and uncropped, the space pdf-lib (and so the check copy) draws in. */
+export interface PageRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** What the check copy's id tags keep off besides the outlines: the printed
+ *  text, by page, and the stamped values. */
+interface TagObstacles {
+  printed?: Readonly<Record<number, readonly PageRegion[]>>;
+  marks?: ReadonlyMap<number, readonly Mark[]>;
+}
+
+/** How far (points) a tag may move from its box, joined to it by a leader line. */
+const TAG_REACH = 30;
+
+/** The gap (points) between two rects; 0 when they touch or overlap. */
+function gapOf(a: Rect, b: Rect): number {
+  const dx = Math.max(0, b.x - (a.x + a.w), a.x - (b.x + b.w));
+  const dy = Math.max(0, b.y - (a.y + a.h), a.y - (b.y + b.h));
+  return Math.hypot(dx, dy);
+}
+
+type Point = { x: number; y: number };
+
+/** A leader line from a tag's edge to the nearest point of its box. */
+function leaderOf(tag: Rect, box: Rect): { start: Point; end: Point } {
+  const cx = tag.x + tag.w / 2;
+  const cy = tag.y + tag.h / 2;
+  const end = {
+    x: Math.min(Math.max(cx, box.x), box.x + box.w),
+    y: Math.min(Math.max(cy, box.y), box.y + box.h),
+  };
+  const start = {
+    x: Math.min(Math.max(end.x, tag.x), tag.x + tag.w),
+    y: Math.min(Math.max(end.y, tag.y), tag.y + tag.h),
+  };
+  return { start, end };
+}
+
+/** Whether the segment a→b passes through rect r (Liang–Barsky clipping). */
+function crosses(a: Point, b: Point, r: Rect): boolean {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const edges: [number, number][] = [
+    [-dx, a.x - r.x],
+    [dx, r.x + r.w - a.x],
+    [-dy, a.y - r.y],
+    [dy, r.y + r.h - a.y],
+  ];
+  for (const [p, q] of edges) {
+    if (p === 0) {
+      if (q < 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
+/** The area two rects share. */
+function overlapArea(a: Rect, b: Rect): number {
+  const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+
+/**
+ * The side of a small box its caption is printed on: the nearer printed text on
+ * the box's own line, left or right (null when none is near).
+ */
+function captionSide(box: Rect, printed: readonly Rect[]): "left" | "right" | null {
+  let left = Infinity;
+  let right = Infinity;
+  const reach = Math.max(4 * box.h, 24);
+  for (const g of printed) {
+    const shared = Math.min(g.y + g.h, box.y + box.h) - Math.max(g.y, box.y);
+    if (shared < 0.4 * Math.min(g.h, box.h)) continue;
+    if (g.x >= box.x + box.w) right = Math.min(right, g.x - (box.x + box.w));
+    else if (g.x + g.w <= box.x) left = Math.min(left, box.x - (g.x + g.w));
+  }
+  if (Math.min(left, right) > reach) return null;
+  return left < right ? "left" : "right";
 }
 
 /** buildCheckPdf's body. `at` is kept on the step in progress. */
@@ -1170,6 +1335,7 @@ async function drawCheckPdf(
   fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
   banner: boolean,
   tags: boolean,
+  avoid: TagObstacles,
   at: CheckStep,
 ): Promise<{ pdf: Uint8Array; notes: string[] }> {
   const step = (stage: string, id?: string) => {
@@ -1196,6 +1362,8 @@ async function drawCheckPdf(
     st: CheckStatus;
     thin: boolean;
     tagged: boolean;
+    /** An option's group: its outline holds the option, so it never blocks the option's tag. */
+    owner?: string;
   };
   const boxes: Outline[] = [];
   for (const e of entries) {
@@ -1209,7 +1377,7 @@ async function drawCheckPdf(
     if (bb) boxes.push({ id: e.id, page: e.group.page, box: bb, st, thin: false, tagged: true });
     if (e.kind === "choice") {
       for (const o of e.options)
-        boxes.push({ id: o.id, page: o.page, box: o, st, thin: true, tagged: true });
+        boxes.push({ id: o.id, page: o.page, box: o, st, thin: true, tagged: true, owner: e.id });
     }
     if (e.kind === "table") {
       for (const c of e.cells)
@@ -1227,6 +1395,24 @@ async function drawCheckPdf(
     return { x: (b.box.xpct / 100) * pw, y: ph - (b.box.ypct / 100) * ph - h, w, h };
   };
   const placedTags = new Map<number, Rect[]>();
+  // The print and the stamped values of a page, in page points: a tag never
+  // covers them when it has anywhere else to go.
+  const inkByPage = new Map<number, Rect[]>();
+  const inkOf = (page: number, pw: number, ph: number): Rect[] => {
+    let ink = inkByPage.get(page);
+    if (!ink) {
+      ink = [];
+      for (const r of avoid.printed?.[page] ?? []) ink.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+      for (const mk of avoid.marks?.get(page) ?? []) {
+        const b = mk.box;
+        const w = (b.wPct / 100) * pw;
+        const h = (b.hPct / 100) * ph;
+        ink.push({ x: (b.xPct / 100) * pw, y: ph - (b.yPct / 100) * ph - h, w, h });
+      }
+      inkByPage.set(page, ink);
+    }
+    return ink;
+  };
   // A table's headers, printed small inside the first cell of each line
   // (R: row header, C: column header) so the agent can compare them with the
   // form's printed headers beside them. Cells carry no tags, so it's free.
@@ -1379,9 +1565,13 @@ async function drawCheckPdf(
     const th = SIZE + 1.2;
     // Candidate spots, preferred first: just above the box (top-right when the
     // box is wide, since a printed caption usually starts at the left, else
-    // top-left); an option's tag first goes under its box, clear of its group's
-    // tag. Then below, beside, and finally inside the box's top. The first spot
-    // that is on the page and clear of every other outline and tag wins.
+    // top-left); an option's tag first goes under its box, then above it, then
+    // on the side away from its caption. The first spot that is on the page and
+    // clear of the print, the stamped values, every other outline and tag wins.
+    // When none is, the nearest clear spot within TAG_REACH, joined to the box
+    // by a leader line; then inside the box's top when that is clear of print
+    // and values; and last the spot that covers the least of them.
+    const self = { x, y, w, h };
     const right = x + w - tw;
     const wide = w > 3 * tw;
     const above = { x: wide ? right : x, y: y + h + 0.2 };
@@ -1391,25 +1581,108 @@ async function drawCheckPdf(
     const side = { x: x + w + 0.8, y: y + h - th };
     const left = { x: x - tw - 0.8, y: y + h - th };
     const inside = { x, y: y + h - th - 0.2 };
+    const win: Rect = {
+      x: x - TAG_REACH - tw,
+      y: y - TAG_REACH - th,
+      w: w + 2 * (TAG_REACH + tw),
+      h: h + 2 * (TAG_REACH + th),
+    };
+    const ink = inkOf(b.page, pw, ph).filter((r) => hits(r, win));
+    const caption = b.thin ? captionSide(self, ink) : null;
     const candidates = b.thin
-      ? [below, belowRight, above, aboveOther, side, left]
+      ? caption === "left"
+        ? [below, belowRight, above, aboveOther, side, left]
+        : [below, belowRight, above, aboveOther, left, side]
       : [above, aboveOther, below, belowRight, side, left];
-    const others = boxes.filter((o) => o !== b && o.page === b.page).map((o) => rectOf(o, pw, ph));
+    const others = boxes
+      .filter((o) => o !== b && o.page === b.page && o.id !== b.owner)
+      .map((o) => rectOf(o, pw, ph))
+      .filter((r) => hits(r, win));
     const taken = placedTags.get(b.page) ?? [];
+    // Only the tags near enough to matter (every tag is kept for the next box).
+    const takenNear = taken.filter((r) => hits(r, win));
+    const rectAt = (c: { x: number; y: number }): Rect => ({ x: c.x, y: c.y, w: tw, h: th });
+    const onPage = (r: Rect) => r.x >= 0 && r.y >= 0 && r.x + r.w <= pw && r.y + r.h <= ph;
+    const clearOfInk = (r: Rect) => !ink.some((o) => hits(r, o));
     const fits = (c: { x: number; y: number }) => {
-      const r = { x: c.x, y: c.y, w: tw, h: th };
+      const r = rectAt(c);
       return (
-        r.x >= 0 &&
-        r.y >= 0 &&
-        r.x + r.w <= pw &&
-        r.y + r.h <= ph &&
+        onPage(r) &&
+        clearOfInk(r) &&
         !others.some((o) => hits(r, o)) &&
-        !taken.some((o) => hits(r, o))
+        !takenNear.some((o) => hits(r, o))
       );
     };
-    const spot = candidates.find(fits) ?? (y + h + 0.2 + th <= ph && !b.thin ? above : inside);
-    taken.push({ x: spot.x, y: spot.y, w: tw, h: th });
+    let spot = candidates.find(fits);
+    let leader = false;
+    if (!spot) {
+      // `fits` is worked out once per spot, when first asked.
+      const ring: { x: number; y: number; d: number; fits?: boolean }[] = [];
+      const stepX = Math.max(2, tw / 3);
+      const stepY = Math.max(1.5, th / 2);
+      for (let yy = y - TAG_REACH - th; yy <= y + h + TAG_REACH; yy += stepY) {
+        for (let xx = x - TAG_REACH - tw; xx <= x + w + TAG_REACH; xx += stepX) {
+          const r = rectAt({ x: xx, y: yy });
+          if (hits(r, self)) continue;
+          const d = gapOf(r, self);
+          if (d <= TAG_REACH) ring.push({ x: xx, y: yy, d });
+        }
+      }
+      ring.sort((p, q) => p.d - q.d);
+      const fitsAt = (c: (typeof ring)[number]) => (c.fits ??= fits(c));
+      // The nearest clear spot, give or take a few points: a leader that
+      // crosses print reads as underlining it, and a tag on the box's own line
+      // reads as beside it.
+      const DETOUR = 12;
+      const crossesInk = (c: { x: number; y: number; d: number }) => {
+        if (c.d <= 1.5) return false;
+        const { start, end } = leaderOf(rectAt(c), self);
+        // Padded: a leader through the gap between two letters still crosses the word.
+        return ink.some((o) =>
+          crosses(start, end, { x: o.x - 1, y: o.y - 1, w: o.w + 2, h: o.h + 2 }),
+        );
+      };
+      const sameLine = (c: { y: number }) => c.y + th / 2 >= y && c.y + th / 2 <= y + h;
+      const first = ring.find(fitsAt);
+      let near: { x: number; y: number; d: number } | undefined;
+      let best = Infinity;
+      for (const c of ring) {
+        if (!first || c.d > first.d + DETOUR) break;
+        if (!fitsAt(c)) continue;
+        const score = c.d + (crossesInk(c) ? DETOUR : 0) + (sameLine(c) ? 0 : DETOUR / 2);
+        if (score < best) {
+          best = score;
+          near = c;
+        }
+      }
+      if (near) {
+        spot = near;
+        leader = near.d > 1.5;
+      }
+    }
+    if (!spot && onPage(rectAt(inside)) && clearOfInk(rectAt(inside))) spot = inside;
+    if (!spot) {
+      // Nothing clear: the spot that covers the least print and values (then
+      // the fewest outlines and tags), the plain candidates first.
+      const cost = (c: { x: number; y: number }) => {
+        const r = rectAt(c);
+        const covered = ink.reduce((n, o) => n + overlapArea(r, o), 0);
+        const crowd = [...others, ...takenNear].filter((o) => hits(r, o)).length;
+        return covered * 100 + crowd;
+      };
+      spot =
+        [...candidates, inside]
+          .filter((c) => onPage(rectAt(c)))
+          .reduce<
+            { x: number; y: number } | undefined
+          >((best, c) => (!best || cost(c) < cost(best) ? c : best), undefined) ?? inside;
+    }
+    taken.push(rectAt(spot));
     placedTags.set(b.page, taken);
+    if (leader) {
+      const { start, end } = leaderOf(rectAt(spot), self);
+      page.drawLine({ start, end, thickness: 0.3, color, opacity: 0.8 });
+    }
     page.drawRectangle({
       x: spot.x,
       y: spot.y,
@@ -1457,6 +1730,11 @@ export interface FillAgentPdfArgs {
   /** The check copy's id tags and table header texts (default true). False
    *  leaves the outlines alone, so nothing is drawn over the print beside a box. */
   checkTags?: boolean;
+  /** The printed text of the check copy's pages, by page (boxes in each
+   *  page's own points, as it draws): its id tags keep off it, as they keep
+   *  off the stamped values. The browser has no text layer to give; the MCP reads it
+   *  with PDFium (none on a scan). */
+  checkPrinted?: Readonly<Record<number, readonly PageRegion[]>>;
 }
 
 export interface FillAgentPdfResult {
@@ -1528,6 +1806,7 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
         a.fonts,
         a.checkBanner !== false,
         a.checkTags !== false,
+        { printed: a.checkPrinted, marks: marksByPage },
       );
       res.checkPdf = built.pdf;
       warnings.push(...built.notes);

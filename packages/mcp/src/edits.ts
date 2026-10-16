@@ -50,6 +50,7 @@ import {
   onPage,
   pageOf,
   removeFields,
+  REF_NAME,
   removeGroup,
   resolveId,
   round,
@@ -92,7 +93,14 @@ export type Op =
   | { op: "resize"; id: string; w: number; h: number }
   | ({ op: "set_box"; id: string; x: number; y: number; w: number; h: number } & Snap)
   | { op: "relabel"; id: string; label: string }
-  | { op: "retype"; id: string; type: string }
+  | {
+      op: "retype";
+      id: string;
+      type: string;
+      cells?: number | Box[];
+      cell_type?: string;
+      date_format?: string;
+    }
   | ({
       op: "add";
       page: number;
@@ -104,9 +112,31 @@ export type Op =
       placeholder?: string;
       required?: boolean;
     } & Snap)
+  | {
+      op: "add";
+      page: number;
+      type: "comb";
+      /** The comb's outer box, cut into `cells` equal cells; or the cells' own boxes. */
+      box?: Box;
+      cells: number | Box[];
+      label: string;
+      cell_type?: string;
+      date_format?: string;
+      section_id?: string;
+      description?: string;
+      required?: boolean;
+    }
   | { op: "delete"; id: string }
   | { op: "set_format"; id: string; format: Record<string, unknown> }
-  | { op: "group"; ids: string[]; kind: "choice" | "comb"; label: string; multiple?: boolean }
+  | {
+      op: "group";
+      ids: string[];
+      kind: "choice" | "comb";
+      label: string;
+      multiple?: boolean;
+      cell_type?: string;
+      date_format?: string;
+    }
   | {
       op: "group";
       kind: "table";
@@ -122,6 +152,8 @@ export type Op =
   | { op: "set_options"; id: string; options: (string | { id: string; label: string })[] }
   | { op: "add_option"; id: string; label: string; box: Box; index?: number }
   | { op: "remove_option"; id: string; option: string }
+  | { op: "comb_add_cell"; id: string; box: Box; date_format?: string }
+  | { op: "comb_remove_cell"; id: string; date_format?: string }
   | { op: "set_required"; id: string; required: boolean }
   | { op: "set_description"; id: string; description: string | null }
   | { op: "set_placeholder"; id: string; placeholder: string | null }
@@ -161,6 +193,8 @@ export const OP_NAMES = [
   "set_options",
   "add_option",
   "remove_option",
+  "comb_add_cell",
+  "comb_remove_cell",
   "set_required",
   "set_description",
   "set_placeholder",
@@ -199,8 +233,10 @@ export interface OpOutcome {
   comb?: CombFormat;
   /** reorder: the page's top-level ids in the order now listed (each section one run). */
   order?: string[];
-  /** set_section / set_section_title: the section as it now stands (null = none). */
+  /** set_section / set_section_title, add, group: the section it now stands in (null = none). */
   section?: SectionRef | null;
+  /** group: the new group's members (its options or cells, ids unchanged) in reading order. */
+  members?: string[];
   noop?: true;
 }
 
@@ -378,6 +414,8 @@ interface OneResult {
   order?: string[];
   /** set_section / set_section_title: the section the op left */
   section?: SectionRef | null;
+  /** group: the new group's members (options, cells) in reading order */
+  members?: string[];
 }
 
 /** Snap a single field's box (percent) to the blank under it, if the op asked. */
@@ -477,6 +515,7 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
     case "retype": {
       const { f, g } = needId(d, op.id);
       if (typeof op.type !== "string") return bad("type is required");
+      if (op.type === "comb") return retypeComb(d, op, g ? undefined : (f as Field), warnings);
       if (g) {
         if (g.kind === "table") {
           return bad(
@@ -510,6 +549,7 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
       return { touched: [fld.id] };
     }
     case "add": {
+      if (op.type === "comb") return addComb(d, op);
       const page = pageOf(d, op.page);
       const box = boxArg(op.box);
       if (typeof op.label !== "string")
@@ -545,7 +585,13 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
       d.s.fields.push(f);
       d.field.set(id, f);
       const snapped = snapField(d, f, raw, opts, warnings);
-      return { touched: [id], added: id, geometry: id, snapped };
+      return {
+        touched: [id],
+        added: id,
+        geometry: id,
+        snapped,
+        section: sectionOf(d, page, id),
+      };
     }
     case "delete": {
       const { f, g } = needId(d, op.id);
@@ -584,28 +630,19 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
               : "set_format applies to a field, or to a comb group (cell_type, date_format)",
           );
         }
-        const comb = g as Record<string, unknown>;
-        const dated = op.format.date_format !== undefined && op.format.date_format !== null;
-        for (const [k, v] of Object.entries(op.format)) {
-          if (k !== "cell_type" && k !== "date_format")
-            bad(`a comb group's format keys are cell_type and date_format, not ${k}`);
-          if (k === "date_format" && v !== null) checkCombDateFormat(d, g, v);
-          if (v === null) delete comb[k];
-          else comb[k] = v;
-        }
-        // A fill reads a comb's date_format only on date cells (agentValues.ts),
-        // so giving one makes the comb a date comb.
-        if (dated) {
-          if (op.format.cell_type !== undefined && op.format.cell_type !== "date")
-            bad('date_format needs cell_type "date": leave cell_type out, or pass "date"');
-          comb.cell_type = "date";
-        }
-        return { touched: [g.id], comb: g.id };
+        return setCombFormat(d, g, op.format);
       }
       const fld = f as Field;
       const own = d.owner.get(fld.id);
-      if (own && (own.kind === "comb" || own.kind === "choice")) {
-        bad(`this is a member of ${String(own.kind)} group ${own.id}, whose kind fixes its format`);
+      // A comb's cells share their comb's format: the op applies to the comb.
+      if (own?.kind === "comb") {
+        warnings.push(
+          `${fld.id}: a comb's cell takes its comb's format; applied to comb ${own.id}`,
+        );
+        return setCombFormat(d, own, op.format);
+      }
+      if (own?.kind === "choice") {
+        bad(`this is a member of choice group ${own.id}, whose kind fixes its format`);
       }
       if (fld.type === "signature" && !isRec(fld.format)) fld.format = {};
       const next: Record<string, unknown> = { ...(isRec(fld.format) ? fld.format : {}) };
@@ -679,9 +716,20 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
         delete f.signing_requirement;
         d.owner.set(f.id, g);
       }
+      // The group stands where its earliest member stood (the editor's groupAs):
+      // on a page with an explicit order it would otherwise fall to the end.
+      const ranks = fs.map((f) => f.order).filter((o): o is number => typeof o === "number");
+      if (ranks.length) g.order = Math.min(...ranks);
       d.s.groups.push(g);
       d.group.set(gid, g);
-      return { touched: [gid], added: gid };
+      if (op.kind === "comb") setCombTyping(d, g, op.cell_type, op.date_format);
+      return {
+        touched: [gid],
+        added: gid,
+        members: readingMembers(d, g).map((m) => m.id),
+        section: sectionOf(d, page, gid),
+        ...(op.kind === "comb" ? { comb: gid } : {}),
+      };
     }
     case "ungroup": {
       const g = needGroup(d, op.id);
@@ -770,6 +818,44 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
       dropMembers(d, g, new Set([oid]));
       removeFields(d, new Set([oid]));
       return { touched: [g.id], deleted: [oid] };
+    }
+    case "comb_add_cell": {
+      const g = needGroup(d, op.id);
+      if (g.kind !== "comb") return bad("comb_add_cell applies to a comb group id");
+      const box = boxArg(op.box);
+      const ms = members(d, g);
+      const f = combCell(g, box, ms.find((m) => typeof m.section_id === "string")?.section_id);
+      d.s.fields.push(f);
+      d.field.set(f.id, f);
+      d.owner.set(f.id, g);
+      g.members = [...(Array.isArray(g.members) ? (g.members as string[]) : []), f.id];
+      keepDateFormat(d, g, op.date_format);
+      return {
+        touched: [g.id, f.id],
+        added: f.id,
+        comb: g.id,
+        members: readingMembers(d, g).map((m) => m.id),
+      };
+    }
+    case "comb_remove_cell": {
+      const f = needField(d, op.id);
+      const g = d.owner.get(f.id);
+      if (!g || g.kind !== "comb") return bad(`${f.id} is not a cell of a comb`);
+      if (Array.isArray(f.cells) && f.cells.length > 1)
+        return bad(
+          `${f.id} is one field over ${String(f.cells.length)} printed cells: delete it, or retype the comb`,
+        );
+      if (combSlotCount(d, g) - 1 < 2)
+        return bad("a comb keeps at least 2 cells; delete or ungroup it instead");
+      dropMembers(d, g, new Set([f.id]));
+      removeFields(d, new Set([f.id]));
+      keepDateFormat(d, g, op.date_format);
+      return {
+        touched: [g.id],
+        deleted: [f.id],
+        comb: g.id,
+        members: readingMembers(d, g).map((m) => m.id),
+      };
     }
     case "set_required": {
       const { f, g } = needId(d, op.id);
@@ -1047,11 +1133,236 @@ function setSectionTitle(d: Doc, op: Record<string, unknown>): OneResult {
 }
 
 /** A comb's date_format: one D/M/Y letter per cell, e.g. DDMMYYYY for 8 cells. */
-function checkCombDateFormat(d: Doc, g: Group, v: unknown): void {
-  const slots = members(d, g).reduce(
+/** A comb's printed cells: one per member, or as many as a member spans. */
+function combSlotCount(d: Doc, g: Group): number {
+  return members(d, g).reduce(
     (n, m) => n + (Array.isArray(m.cells) && m.cells.length > 1 ? m.cells.length : 1),
     0,
   );
+}
+
+const CELL_TYPES: readonly unknown[] = ["char", "integer", "date"];
+/** The most cells one comb op makes (an IBAN has 34). */
+export const MAX_COMB_CELLS = 100;
+
+/** A comb's cell: a text field with no label (nobody sees a cell's own). */
+function combCell(g: Group, b: Box, section: unknown): Field {
+  return {
+    id: randomUUID(),
+    label: "",
+    type: "text",
+    page: g.page,
+    section_id: typeof section === "string" ? section : null,
+    xpct: b.x * 100,
+    ypct: b.y * 100,
+    wpct: b.w * 100,
+    hpct: b.h * 100,
+    group: g.id,
+  } as Field;
+}
+
+/** The cells of a new comb (fractions): `cells` boxes as given, or `box` cut into `cells` equal ones. */
+function combBoxes(cells: unknown, box: () => Box): Box[] {
+  if (Array.isArray(cells)) {
+    if (cells.length < 2 || cells.length > MAX_COMB_CELLS)
+      return bad(`cells lists 2–${String(MAX_COMB_CELLS)} cell boxes`);
+    return cells.map((c, i) => boxArg(c, `cells[${String(i)}]`));
+  }
+  if (!Number.isInteger(cells) || (cells as number) < 2 || (cells as number) > MAX_COMB_CELLS) {
+    return bad(
+      `cells is the number of printed cells (2–${String(MAX_COMB_CELLS)}), cut from the box in equal widths, or a list of the cells' own boxes [{x, y, w, h}, …] (for cells split by printed separators)`,
+    );
+  }
+  const b = box();
+  const n = cells as number;
+  return Array.from({ length: n }, (_, i) => ({
+    x: b.x + (i * b.w) / n,
+    y: b.y,
+    w: b.w / n,
+    h: b.h,
+  }));
+}
+
+/** A new comb group over `boxes`, its cells added to the document. */
+function newComb(
+  d: Doc,
+  a: {
+    page: number;
+    boxes: Box[];
+    label: string;
+    section: unknown;
+    cellType?: unknown;
+    dateFormat?: unknown;
+  },
+): Group {
+  const g = {
+    id: randomUUID(),
+    kind: "comb",
+    label: a.label,
+    page: a.page,
+    members: [],
+    cell_type: "char",
+  } as Group;
+  const cells = a.boxes.map((b) => combCell(g, b, a.section));
+  for (const f of cells) {
+    d.s.fields.push(f);
+    d.field.set(f.id, f);
+    d.owner.set(f.id, g);
+  }
+  g.members = cells.map((f) => f.id);
+  d.s.groups.push(g);
+  d.group.set(g.id, g);
+  setCombTyping(d, g, a.cellType, a.dateFormat);
+  return g;
+}
+
+/** A comb's cell_type and date_format as an op gives them; a date_format makes it a date comb. */
+function setCombTyping(d: Doc, g: Group, cellType: unknown, dateFormat: unknown): void {
+  const comb = g as Record<string, unknown>;
+  if (cellType !== undefined) {
+    if (!CELL_TYPES.includes(cellType)) bad('cell_type is "char", "integer" or "date"');
+    comb.cell_type = cellType;
+  }
+  if (dateFormat !== undefined && dateFormat !== null) {
+    if (cellType !== undefined && cellType !== "date")
+      bad('date_format needs cell_type "date": leave cell_type out, or pass "date"');
+    checkCombDateFormat(d, g, dateFormat);
+    comb.cell_type = "date";
+    comb.date_format = dateFormat;
+  }
+}
+
+/** After a cell is added or removed: a date comb's date_format (one letter per
+ *  cell) must be given anew. */
+function keepDateFormat(d: Doc, g: Group, given: unknown): void {
+  const comb = g as Record<string, unknown>;
+  if (given !== undefined && given !== null) return setCombTyping(d, g, undefined, given);
+  if (comb.cell_type === "date" && typeof comb.date_format === "string" && comb.date_format) {
+    bad(
+      `comb ${g.id} is a date comb (date_format ${comb.date_format}, one letter per cell): pass date_format for its ${String(combSlotCount(d, g))} cells`,
+    );
+  }
+}
+
+/** set_format on a comb group: cell_type and date_format only. */
+function setCombFormat(d: Doc, g: Group, format: Record<string, unknown>): OneResult {
+  const comb = g as Record<string, unknown>;
+  const dated = format.date_format !== undefined && format.date_format !== null;
+  for (const [k, v] of Object.entries(format)) {
+    if (k !== "cell_type" && k !== "date_format")
+      bad(`a comb group's format keys are cell_type and date_format, not ${k}`);
+    if (k === "date_format" && v !== null) checkCombDateFormat(d, g, v);
+    if (v === null) delete comb[k];
+    else comb[k] = v;
+  }
+  // A fill reads a comb's date_format only on date cells (agentValues.ts),
+  // so giving one makes the comb a date comb.
+  if (dated) {
+    if (format.cell_type !== undefined && format.cell_type !== "date")
+      bad('date_format needs cell_type "date": leave cell_type out, or pass "date"');
+    comb.cell_type = "date";
+  }
+  return { touched: [g.id], comb: g.id };
+}
+
+/** add {type: "comb"}: a comb group made in one op. */
+function addComb(d: Doc, op: Record<string, unknown>): OneResult {
+  const page = pageOf(d, op.page);
+  if (typeof op.label !== "string")
+    return bad("label is required (the form's caption for this blank)");
+  if (op.snap !== undefined)
+    return bad("a comb takes no snap: give its cells' boxes, or its outer box and a cell count");
+  const boxes = combBoxes(op.cells, () => boxArg(op.box));
+  let section: string | null;
+  if (op.section_id !== undefined) {
+    const sid = resolveId(d, op.section_id, ["section"], "section_id");
+    if (!sectionIds(d, page).has(sid)) {
+      return bad(`section_id ${sid} is not a section of page ${String(page)}`);
+    }
+    section = sid;
+  } else section = sectionForPos(d, page, boxes[0].x * 100, boxes[0].y * 100);
+  const g = newComb(d, {
+    page,
+    boxes,
+    label: op.label.trim(),
+    section,
+    cellType: op.cell_type,
+    dateFormat: op.date_format,
+  });
+  if (typeof op.description === "string" && op.description.trim())
+    g.description = op.description.trim();
+  if (op.required === true) g.required = true;
+  return {
+    touched: [g.id],
+    added: g.id,
+    comb: g.id,
+    members: readingMembers(d, g).map((m) => m.id),
+    section: sectionOf(d, page, g.id),
+  };
+}
+
+/** retype {type: "comb"}: a standalone text or date field becomes a comb over
+ *  its box (or the cells given), keeping its label, section, order, required
+ *  and description; the field itself is replaced. */
+function retypeComb(
+  d: Doc,
+  op: Record<string, unknown>,
+  f: Field | undefined,
+  warnings: string[],
+): OneResult {
+  if (!f) return bad("only a field can be retyped to a comb; ungroup a group first");
+  if (d.owner.has(f.id))
+    return bad(`this is a member of group ${d.owner.get(f.id)!.id}; ungroup it first`);
+  if (f.type !== "text" && f.type !== "date")
+    return bad("only a text or date field can become a comb");
+  const boxes = combBoxes(op.cells, () => ({
+    x: f.xpct / 100,
+    y: f.ypct / 100,
+    w: f.wpct / 100,
+    h: f.hpct / 100,
+  }));
+  let dateFormat = op.date_format;
+  if (
+    f.type === "date" &&
+    (op.cell_type === undefined || op.cell_type === "date") &&
+    dateFormat === undefined
+  ) {
+    // The field's printed date format, its separators dropped (DD/MM/YYYY → DDMMYYYY).
+    const printed =
+      isRec(f.format) && typeof f.format.date_format === "string"
+        ? f.format.date_format
+        : DATE_FORMATS[0];
+    const letters = printed.replace(/[^DMY]/g, "");
+    if (letters.length === boxes.length) dateFormat = letters;
+    else
+      warnings.push(
+        `${f.id}: its date format ${printed} has ${String(letters.length)} digits, the comb ${String(boxes.length)} cells; set_format the comb's date_format (one D, M or Y per cell)`,
+      );
+  }
+  const g = newComb(d, {
+    page: f.page,
+    boxes,
+    label: typeof f.label === "string" ? f.label : "",
+    section: f.section_id,
+    cellType: op.cell_type,
+    dateFormat,
+  });
+  if (f.required === true) g.required = true;
+  if (typeof f.description === "string" && f.description.trim()) g.description = f.description;
+  if (typeof f.order === "number") g.order = f.order;
+  removeFields(d, new Set([f.id]));
+  return {
+    touched: [g.id],
+    added: g.id,
+    deleted: [f.id],
+    comb: g.id,
+    members: readingMembers(d, g).map((m) => m.id),
+    section: sectionOf(d, f.page, g.id),
+  };
+}
+
+function checkCombDateFormat(d: Doc, g: Group, v: unknown): void {
+  const slots = combSlotCount(d, g);
   if (typeof v !== "string" || !/^[DMY]+$/.test(v) || v.length !== slots) {
     bad(
       `a comb's date_format has one letter (D, M or Y) per cell: this comb has ${String(slots)} cells (e.g. ${slots === 8 ? "DDMMYYYY" : slots === 6 ? "DDMMYY" : "D".repeat(Math.min(2, slots)) + "…"})`,
@@ -1144,6 +1455,8 @@ function applyPass(
   const outcomes: OpOutcome[] = [];
   const told: Refusal[] = [];
   const confirmed: Refusal[] = [];
+  // The batch's refs: what an op with `ref` added, for "$ref" in later ops.
+  const refs = new Map<string, string>();
   let applied = 0;
   ops.forEach((raw, i) => {
     const skip = excluded.get(i);
@@ -1153,9 +1466,20 @@ function applyPass(
     }
     const draft = structuredClone(cur);
     const d = index(draft);
+    d.refs = refs;
     const w: string[] = [];
     try {
+      const given = isRec(raw) ? raw.ref : undefined;
+      if (given !== undefined && (typeof given !== "string" || !REF_NAME.test(given)))
+        bad('ref names what this op adds: a letter, then letters, digits, "_" or "-" (32 at most)');
+      const ref = typeof given === "string" ? given : undefined;
+      if (ref !== undefined && refs.has(ref))
+        bad(`ref "${ref}" is already taken by an earlier op of this batch`);
       const r = applyOne(d, raw as Op, w, opts);
+      if (ref !== undefined && !r.added)
+        bad(
+          "ref names what an op adds (add, group, add_option, comb_add_cell…); this op adds nothing",
+        );
       const issues = touchedIssues(d, r.touched, r.tables);
       if (issues.length) {
         bad(
@@ -1209,10 +1533,12 @@ function applyPass(
         ...(comb ? { comb } : {}),
         ...(r.order ? { order: r.order } : {}),
         ...(r.section !== undefined ? { section: r.section } : {}),
+        ...(r.members ? { members: r.members } : {}),
         ...(noop ? { noop: true as const } : {}),
       });
       cur = draft;
       applied++;
+      if (typeof ref === "string" && r.added) refs.set(ref, r.added);
       confirmed.push(...vouched);
       counts[name] = (counts[name] ?? 0) + 1;
       if (r.added) added.push({ op_index: i, id: r.added });
@@ -1271,6 +1597,8 @@ export interface Wording {
   page?: number;
   prop: string;
   text: string;
+  /** A comb cell's label: nobody sees it, so one equal to an answer of under 4 characters is not warned about. */
+  quiet?: true;
 }
 
 /**
@@ -1279,16 +1607,30 @@ export interface Wording {
  */
 export function wordingOf(s: RenderSchema): Wording[] {
   const out: Wording[] = [];
-  const add = (id: unknown, prop: string, v: unknown, page?: unknown) => {
+  const add = (id: unknown, prop: string, v: unknown, page?: unknown, quiet = false) => {
     if (typeof v === "string" && v.trim() && typeof id === "string")
-      out.push({ id, ...(typeof page === "number" ? { page } : {}), prop, text: v });
+      out.push({
+        id,
+        ...(typeof page === "number" ? { page } : {}),
+        prop,
+        text: v,
+        ...(quiet ? { quiet: true as const } : {}),
+      });
   };
   const rec = (x: unknown): Record<string, unknown> | null =>
     typeof x === "object" && x !== null && !Array.isArray(x)
       ? (x as Record<string, unknown>)
       : null;
+  // A comb's cells are never shown by their own label (the comb is one entry,
+  // under the group's): a placeholder label on one ("D1") equal to an answer
+  // too short to refuse is not warned about; a longer answer is refused.
+  const combCells = new Set<unknown>();
+  for (const g of s.groups as Record<string, unknown>[]) {
+    if (g.kind === "comb" && Array.isArray(g.members)) for (const m of g.members) combCells.add(m);
+  }
   for (const f of s.fields as Record<string, unknown>[]) {
-    for (const k of ["label", "description", "placeholder"]) add(f.id, k, f[k]);
+    for (const k of ["label", "description", "placeholder"])
+      add(f.id, k, f[k], undefined, k === "label" && combCells.has(f.id));
     const fmt = rec(f.format);
     if (fmt) for (const k of ["date_format", "symbol"]) add(f.id, `format.${k}`, fmt[k]);
   }

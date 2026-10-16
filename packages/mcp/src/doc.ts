@@ -49,7 +49,12 @@ export interface Doc {
   owner: Map<string, Group>;
   /** section id → its page */
   section: Map<string, number>;
+  /** The batch's refs (`ref` on an op that adds something): name → the new id. */
+  refs?: Map<string, string>;
 }
+
+/** A ref an op may take: a letter, then letters, digits, "_" or "-". */
+export const REF_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 
 export function index(s: RenderSchema): Doc {
   const field = new Map<string, Field>();
@@ -85,11 +90,22 @@ export type IdKind = "field" | "group" | "section";
  */
 export function resolveId(
   d: Doc,
-  raw: unknown,
+  given: unknown,
   kinds: readonly IdKind[] = ["field", "group"],
   name = "id",
 ): string {
-  if (typeof raw !== "string" || !raw) return bad(`${name} is required`);
+  if (typeof given !== "string" || !given) return bad(`${name} is required`);
+  let raw: string = given;
+  // "$c1": what an earlier op of this batch made with ref "c1".
+  if (raw.startsWith("$")) {
+    const made = d.refs?.get(raw.slice(1));
+    if (made === undefined) {
+      return bad(
+        `${name} ${raw}: no earlier op of this batch made "${raw.slice(1)}" (give that op ref: "${raw.slice(1)}"; a rejected op makes nothing)`,
+      );
+    }
+    raw = made;
+  }
   const pools: Map<string, unknown>[] = kinds.map((k) =>
     k === "field" ? d.field : k === "group" ? d.group : d.section,
   );

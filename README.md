@@ -127,10 +127,14 @@ cancelling the call ends the wait. `too_many_active_jobs` counts every running a
 workspace, free native-field (AcroForm) ones included.
 
 `fill_form` and `fill_template` take `values`, `output_path` (a new `.pdf`) and optional
-`overwrite`. They never overwrite the input PDF. In `values` (here and in `preview_page`), an id
-may be shortened to an unambiguous prefix of 6+ characters, the length of the preview tags; that
-goes for a table's cell or column ids inside its value too. A key that matches nothing is listed
-in `skipped`.
+`overwrite`. They never overwrite the input PDF. In `values` (here and in `preview_page`), any id
+may be shortened to an unambiguous prefix of 4+ characters (the preview tags show 6); that goes
+for a table's cell or column ids inside its value, and for option ids in a choice's value, too. A
+table cell's id given at the top level goes into its table's value, and an option's id given
+`true` selects it (a radio's value, or one more item of a multiselect's list; `false` leaves it
+unselected). A key that matches nothing is listed in `skipped`; one that starts several ids is
+listed with its candidates, and a nested id that can't stand alone (a comb's cell, a table_rows
+column) names the entry it belongs to.
 
 ### Previews and corrections
 
@@ -146,7 +150,11 @@ when that follows the box height); a choice's options with their own boxes; a ta
 `(row, col)`, its `orientation` and headers (also printed on the image inside, or beside, the
 first cell of each line as `R: …` / `C: …`; a character the bundled fonts lack is shown as `?`
 there, with a warning, and the legend keeps the full text); a `table_rows` table's columns and printed cells
-with their boxes (fill values still go by column id). `warnings` and `placement_warnings` are
+with their boxes (fill values still go by column id); every date field, table date cell and date
+column's `date_format` (the default `DD/MM/YYYY` when none is stored); and a comb's `cell_type`,
+`max_length`, `date_format`, and in a `crop` its `comb_cells`: each printed cell in reading order with its tag
+(the cell's own field; `index` for one cell of a field drawn over several) and box, plus the
+`date_part` (`D`, `M` or `Y`) each cell of a date comb holds. `warnings` and `placement_warnings` are
 always present (`[]` = checked and clean): placement covers every box shown, so a plain preview
 is a read-only placement audit (see the checks under `edit_template`). `crop`
 (`{x, y, w, h}`, fractions) with `zoom` (default 2, max 8) renders just a region, magnified, and
@@ -157,8 +165,12 @@ options/cells/columns (`members_changed` counts them, so a header edit doesn't l
 grid), plus `removed` ids and `moved_into` (ids that now sit inside a table or group), and
 `legend: "none"` omits the legend. `overlay` says what is drawn over the page: `"full"` (the
 default), `"outline"` (the boxes without id tags and table header texts) or `"none"` (nothing:
-the page as a fill stamps it). Use the last two when a tag covers a caption, a tick box or a
-stamped value; `"none"` needs no outlined copy, so it also renders after `check_copy_failed`.
+the page as a fill stamps it). Since 0.2.3 the `"full"` tags keep off the printed text (read from
+the PDF's text layer) and the stamped values: an option's tag goes below, above or on the side
+away from its caption, and a tag with no room beside its box is moved off and joined to it by a
+thin line. On a scan there is no text layer, so a tag may still cover print there. Use the last
+two when an outline covers what you must read; `"none"` needs no outlined copy, so it also
+renders after `check_copy_failed`.
 The legend and `placement_warnings` are the same in all three. It renders the local working copy (`edit_template`) when there is one, otherwise the saved
 template or analyzed version; `edited: true` / `false` in the result says which. The page is rendered on your machine by
 PDFium (WebAssembly, shipped in the package; nothing native is installed), nothing is written to
@@ -176,6 +188,19 @@ disk, and the image goes only to the calling client.
   `cell_type` (`char`, `integer` or `date`) and `date_format` (one `D`, `M` or `Y` per cell, e.g.
   `DDMMYYYY`). Giving a `date_format` makes it a date comb, and `diff_summary.ops` echoes the
   comb's `cell_type`, `date_format` and `max_length` as a fill will read them;
+- combs in one op (0.2.3): `add {type: "comb", page, label, cells, box?, cell_type?,
+date_format?, section_id?, required?, description?}` makes a comb, either `box` cut into
+  `cells` equal cells, or `cells` as a list of the printed cells' own boxes (cells split by
+  printed separators, as in DD / MM / YYYY). `retype {id, type: "comb", cells, cell_type?,
+date_format?}` turns a text or date field into a comb over its box, keeping its label,
+  section, order, `required` and description (a date field's `DD/MM/YYYY` gives `DDMMYYYY` when
+  the counts agree). `comb_add_cell {id: comb, box, date_format?}` and `comb_remove_cell {id:
+cell, date_format?}` keep the comb's id; a date comb needs its new `date_format` with them (one
+  letter per cell). `group {kind: "comb"}` also takes `cell_type` and `date_format`, and
+  `set_format` on a comb's cell applies to its comb. A comb's cells have no label of their own;
+- refs within a batch: give an op that adds something a `ref` (`"dob"`), and later ops of the
+  same call name what it added as `"$dob"` wherever an id goes (`set_format {id: "$dob", …}`,
+  `group {ids: ["$a", "$b"]}`). A ref of a rejected op names nothing;
 - tables: `group` with `kind: "table"` (a `cells` grid of field ids, rows × columns with `null`
   for a gap, or `ids` laid out from their boxes; `header_cols`, `header_rows`, `orientation`,
   `format`), `table_insert` / `table_delete` (a row or column; a new line's geometry is
@@ -184,7 +209,10 @@ disk, and the image goes only to the calling client.
   and `set_header` / `set_headers` (`{id, axis, texts: [...], start?}`, several in one op). Every cell of one column (or row, for `orientation: "row"`) has one type,
   as in the web editor; `set_format` on a table cell applies to its whole column or row;
 - order: `reorder {page, ids}` moves those top-level entries together, in that order, to where
-  the first of them sat, and stamps an explicit `order` on every entry of the page (the web
+  whichever of them is listed first now stands (not necessarily `ids[0]`'s place); every other
+  entry keeps its relative order. A partial list moves only what it names: to put B right after
+  A, list both, and chained partial reorders are simplest replaced by one with the page's whole
+  list. It stamps an explicit `order` on every entry of the page (the web
   editor's layer-panel convention), so a later sub-pixel move no longer reshuffles questions.
   `diff_summary.ops` shows the `order` the page is now listed in. fenfill lists each section as
   one run, standing where its first entry stands, so entries of different sections never stand
@@ -193,7 +221,10 @@ disk, and the image goes only to the calling client.
 - sections: `set_section {ids, section_id}` moves fields or groups of one page to another of
   that page's sections (`null`: out of every section; a group moves with all its members), and
   `set_section_title {page, section_id, title}` renames one. `get_template` and `analyze_form`
-  show each section's `section_id`.
+  show each section's `section_id`. `add` without `section_id` lands in the section of the
+  nearest field at or above it, a new `group` in its earliest member's section and at that
+  member's place in the order; `diff_summary.ops` gives each one's `section`, and a `group` its
+  `members` (ids unchanged) in reading order.
 
 Any id can be shortened to an unambiguous prefix of 6+ characters (the length of the preview
 tags); an ambiguous prefix is rejected with the candidates. `add`, `move` and `set_box` take an
@@ -206,10 +237,22 @@ scan can be missed, and an underline box is one line of handwriting tall (as tal
 space above the rule, within about 11–16 pt). `diff_summary.ops` lists every applied op with
 `snapped: true/false` (when it asked for a snap) and `noop: true` when it changed nothing; a
 batch that leaves the form as it was writes no working copy (`has_edits` stays `false`). After
-each edit, the boxes you touched are checked for three placement problems: a value that would
+each edit, the boxes you touched are checked for four placement problems: a value that would
 print much larger than the page's other fields (an Auto box's text size follows its height), a
-box over printed text (text layer only, so not on scans), and a box that runs a little past the
-ruled cell it sits in (from the page render, so scans too). `set_format` merges into the stored
+box over printed text (text layer only, so not on scans; the covered text is quoted), and a box
+that runs a little past the ruled cell it sits in (from the page render, so scans too). Pale text
+printed at the left edge of a blank's row or cell is a hint and is written over ("Name",
+"Address"); a caption printed part-way along the row is not. So a box over a pale hint at its
+left edge (or its ruled cell's) is no misplacement: it is listed under `notes` here and
+`placement_notes` in `preview_page`, never as a warning. Invisible text (an OCR layer over a
+scan) counts as the print it stands for. Signature boxes get the printed-text check too. And a choice's option box is checked
+against its caption in reading order: it warns when the box is on the other side of its caption
+from the question's other boxes (one question never mixes sides), or when the first printed text
+after the box (before it, for boxes printed after their captions) is another option's caption. An
+option the form prints no box for has its box on the same side as the printed ones; when that
+side has no room on its caption's line (its caption starts the line), the box goes in the slot
+just before the caption in reading order, at the end of the line above, and that passes. Not on
+scans (no text layer). `set_format` merges into the stored
 format (a date field keeps its date format when you only set `font_size`).
 Coordinates are fractions of the page (0–1) with a top-left origin, the same as the legend's
 `box`. Each op is checked against the rules fenfill applies when saving and is rejected with a
@@ -228,8 +271,10 @@ page shows it: a date in its field's printed format (`1990-05-17` as `17.05.1990
 characters without the separators typed between them, an answer of several lines also line by
 line. A date written a third way (`17/05/1990`) is not recognised. The values of a fill or
 preview that failed before the form was read (an output file that already exists, a failed
-download) count as answers too. The reason names the entry and the property (a section with
-its page), never the text. A printed caption can share a word with a test value (`Middle name` after
+download) count as answers too. A comb cell's own label is never shown (the comb is listed under the
+group's label), so a placeholder label on a cell that equals an answer of under 4 characters
+(`D1`) passes without a warning; one equal to a longer answer, or holding one, is refused. The
+reason names the entry and the property (a section with its page), never the text. A printed caption can share a word with a test value (`Middle name` after
 previewing `Middle`): when the rejected wording is the form's own, send the op again with
 `confirm_wording: true`. That lets through only wording a rejection has already named (that
 text in that property), and what you confirmed is the wording: it is not asked about again in
@@ -257,8 +302,10 @@ unsaved analysis can be edited for filling but not saved: to keep corrections,
 analyze with `save_as_template: true` and edit that template. With nothing to save, it succeeds
 with `saved: false, nothing_to_save: true`. `get_template` lists the fields in `sections`, in fenfill's order: one
 block per section (with its `section_id` and `title`), and fields in no section as blocks of
-their own where they stand. It says `has_local_edits` (its fields
-are fenfill's saved version; `preview_page` shows the working copy) and gives `field_count`
+their own where they stand. With local edits it lists the working copy, as `fill_template` and
+`preview_page` use it (`edited: true`, `has_local_edits: true`): new option ids, deleted rows,
+sections and order show before you save; `version: "saved"` lists fenfill's saved version
+instead (`edited: false`). It gives `field_count`
 (entries listed) and `field_count_total` (the whole form); `save_template`'s `field_count` is
 the whole saved template.
 
@@ -295,7 +342,7 @@ same run at no extra charge.
 | Field type          | Value                                                                       |
 | ------------------- | --------------------------------------------------------------------------- |
 | `text`, `multiline` | string, stamped exactly as given                                            |
-| `comb`              | string, one character per cell                                              |
+| `comb`              | string, one character per cell (a date comb: below)                         |
 | `date`              | `"YYYY-MM-DD"`, printed in the field's `date_format` (e.g. `DD/MM/YYYY`)    |
 | `checkbox`          | `true` / `false`                                                            |
 | `radio`             | option id, option label, or the bare option text (`"No"` for `"Smoke? No"`) |
@@ -303,6 +350,11 @@ same run at no extra charge.
 | `table`             | `{ "<cellId>": value, … }`                                                  |
 | `table_rows`        | `[{ "<columnId>": value, … }, …]`                                           |
 | `signature`         | `{ "image_path": "/abs/path/signature.png" }` (PNG or JPG)                  |
+
+A date comb (`cell_type: "date"`) takes the whole date as one string, never cell by cell:
+`"YYYY-MM-DD"`, laid out by its `date_format` (`DDMMYYYY` writes `17052024`), or exactly its
+`max_length` digits in the printed order. The preview legend lists a comb's `cell_type`,
+`max_length`, `date_format` and cells.
 
 A date the form asks for in a plain `text` field is not reformatted: write it the way the field's
 label or placeholder asks (for example `10042026` for "mmddyyyy"). A `signature` whose

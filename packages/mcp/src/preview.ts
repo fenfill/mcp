@@ -10,6 +10,7 @@
 // disk and nothing is sent anywhere.
 
 import { checkTagIds, shortIds } from "@/app/t/[template_id]/agentValues";
+import { dateFormatOf } from "@/types";
 import {
   agentEntries,
   buildFieldById,
@@ -29,7 +30,15 @@ import {
 } from "./fill.js";
 import type { Fonts } from "./fonts.js";
 import { toArrayBuffer } from "./fonts.js";
-import { DEFAULT_DPI, encodePng, MAX_DPI, MIN_DPI, type Region, renderPage } from "./render.js";
+import {
+  DEFAULT_DPI,
+  encodePng,
+  MAX_DPI,
+  MIN_DPI,
+  printedBoxes,
+  type Region,
+  renderPage,
+} from "./render.js";
 import type { RenderSchema } from "./types.js";
 
 export interface PreviewArgs {
@@ -82,15 +91,32 @@ export interface LegendRow {
     type: string;
     label: string;
     box: LegendRow["box"];
+    date_format?: string;
   }[];
   /** A table's typing: which axis drives the types, and the headers. */
   orientation?: "col" | "row";
   header_cols?: string[];
   header_rows?: string[];
   /** An expandable table's columns (fill values key rows by these ids); box = the first row's cell. */
-  columns?: { tag: string; id: string; label: string; type: string; box: LegendRow["box"] }[];
+  columns?: {
+    tag: string;
+    id: string;
+    label: string;
+    type: string;
+    box: LegendRow["box"];
+    date_format?: string;
+  }[];
   /** A text/date field's stored format (variant, date_format, font_size, text_anchor…). */
   format?: Record<string, unknown>;
+  /** A date field, table date cell or date comb: the format it prints (the default when unset). */
+  date_format?: string;
+  /** A comb: what its cells take, how many characters, and each printed cell in
+   *  reading order (index: the cell of a member that spans several; date_part:
+   *  the date_format letter a date comb's cell holds). preview_page lists the
+   *  cells only in a crop. */
+  cell_type?: string;
+  max_length?: number;
+  comb_cells?: { tag: string; index?: number; box: LegendRow["box"]; date_part?: string }[];
   /** A single-line text/date field: the size its value starts at, and whether that follows the box (Auto). */
   font_pt?: number;
   font_auto?: boolean;
@@ -129,6 +155,30 @@ function boxOf(fs: readonly Pct[]): LegendRow["box"] | null {
   return { x: r4(x0 / 100), y: r4(y0 / 100), w: r4((x1 - x0) / 100), h: r4((y1 - y0) / 100) };
 }
 
+/** The printed cells of a comb's members in reading order (members come in
+ *  resolveMembers order): a member over several cells gives each of them, with
+ *  its index; any other member is one cell, its own box. */
+function combCells(
+  members: readonly (Pct & { id: string; cells?: unknown })[],
+): { id: string; index?: number; box: LegendRow["box"] }[] {
+  const out: { id: string; index?: number; box: LegendRow["box"] }[] = [];
+  for (const m of members) {
+    const cells = Array.isArray(m.cells)
+      ? (m.cells as { x: number; y: number; w: number; h: number }[])
+      : [];
+    if (cells.length > 1) {
+      cells.forEach((c, index) => {
+        out.push({
+          id: m.id,
+          index,
+          box: { x: r4(c.x / 100), y: r4(c.y / 100), w: r4(c.w / 100), h: r4(c.h / 100) },
+        });
+      });
+    } else out.push({ id: m.id, box: boxOf([m])! });
+  }
+  return out;
+}
+
 const topId = (id: string): string => id.split(/[.[]/, 1)[0];
 
 /** The page of every id a value key can name: an entry's own, and through its
@@ -160,6 +210,16 @@ export function legendRows(render: RenderSchema, page: number): LegendRow[] {
   const schema = normalizeSchema(render as unknown as Parameters<typeof normalizeSchema>[0]);
   const entries = agentEntries(schema);
   const short = shortIds(checkTagIds(entries));
+  // Comb cells get tags of their own, unique among every id, so the other tags
+  // keep the lengths the check copy prints.
+  let combShort: Map<string, string> | null = null;
+  const combTag = (id: string): string => {
+    combShort ??= shortIds([
+      ...checkTagIds(entries),
+      ...entries.flatMap((e) => (e.kind === "comb" ? e.members.map((m) => m.id) : [])),
+    ]);
+    return combShort.get(id) ?? id;
+  };
   const onPage = entries.filter((e) =>
     e.kind === "field" ? e.field.page === page : e.group.page === page,
   );
@@ -179,6 +239,30 @@ export function legendRows(render: RenderSchema, page: number): LegendRow[] {
       if (fmt && typeof fmt === "object" && !Array.isArray(fmt) && Object.keys(fmt).length) {
         row.format = fmt as Record<string, unknown>;
       }
+      if (e.type === "date") row.date_format = dateFormatOf(e.field);
+      if (e.type === "comb") {
+        // A field drawn over several printed cells: it takes one character per
+        // cell, as typed (a date too: no date_format lays it out), as
+        // get_template lists it.
+        row.max_length = combCells([e.field]).length;
+        row.comb_cells = combCells([e.field]).map((c) => ({
+          tag: combTag(c.id),
+          index: c.index,
+          box: c.box,
+        }));
+      }
+    }
+    if (e.kind === "comb") {
+      row.cell_type = e.cellType;
+      row.max_length = e.maxLength;
+      if (e.dateFormat) row.date_format = e.dateFormat;
+      const fmt = e.dateFormat ?? "";
+      row.comb_cells = combCells(e.members).map((c, i) => ({
+        tag: combTag(c.id),
+        ...(c.index !== undefined ? { index: c.index } : {}),
+        box: c.box,
+        ...(fmt.length === e.maxLength && fmt[i] ? { date_part: fmt[i] } : {}),
+      }));
     }
     if (e.kind === "choice") {
       row.options = e.options.map((o) => ({
@@ -205,6 +289,7 @@ export function legendRows(render: RenderSchema, page: number): LegendRow[] {
         type: c.type,
         label: c.label,
         box: boxOf([c.field])!,
+        ...(c.type === "date" ? { date_format: dateFormatOf(c.field) } : {}),
       }));
     }
     if (e.kind === "table_rows") {
@@ -214,6 +299,7 @@ export function legendRows(render: RenderSchema, page: number): LegendRow[] {
         label: c.label,
         type: c.type,
         box: boxOf([c.field])!,
+        ...(c.type === "date" ? { date_format: dateFormatOf(c.field) } : {}),
       }));
       // The printed rows' cells (geometry only: fill values go by column id).
       const body = expBodyRows(
@@ -245,10 +331,20 @@ export function legendRows(render: RenderSchema, page: number): LegendRow[] {
 }
 
 type Member = { id: string };
+type CombCell = NonNullable<LegendRow["comb_cells"]>[number];
+/** A comb cell's key in legendPrints: where it is on the page, not its tag (a
+ *  tag's length follows every other id, so an unrelated add changes it) nor
+ *  its place in the comb (one cell added at the front would shift them all).
+ *  A cell that moved is listed as changed: its old key is not in `before`. */
+const combKey = (c: CombCell): string =>
+  `cell@${c.box.x.toFixed(4)},${c.box.y.toFixed(4)}` +
+  (c.index !== undefined ? `#${String(c.index)}` : "");
+/** A row's options, cells, columns and comb cells. */
 const membersOf = (r: LegendRow): Member[] => [
   ...(r.options ?? []),
   ...(r.cells ?? []),
   ...(r.columns ?? []),
+  ...(r.comb_cells ?? []).map((c) => ({ ...c, id: combKey(c) })),
 ];
 
 /**
@@ -259,7 +355,7 @@ const membersOf = (r: LegendRow): Member[] => [
 export function legendPrints(rows: readonly LegendRow[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const r of rows) {
-    const { tag: _tag, options: _o, cells: _c, columns: _cols, ...own } = r;
+    const { tag: _tag, options: _o, cells: _c, columns: _cols, comb_cells: _cc, ...own } = r;
     out.set(r.id, JSON.stringify(own));
     for (const m of membersOf(r)) {
       const { tag: _t, ...rest } = m as Member & { tag?: string };
@@ -292,7 +388,8 @@ export function legendChanges(
     if (r.options) row.options = r.options.filter(differs);
     if (r.cells) row.cells = r.cells.filter(differs);
     if (r.columns) row.columns = r.columns.filter(differs);
-    for (const k of ["options", "cells", "columns"] as const) {
+    if (r.comb_cells) row.comb_cells = r.comb_cells.filter((c) => differs({ id: combKey(c) }));
+    for (const k of ["options", "cells", "columns", "comb_cells"] as const) {
       if (row[k]?.length === 0) delete row[k];
     }
     row.members_changed = n;
@@ -303,7 +400,9 @@ export function legendChanges(
   const moved: { id: string; into: string }[] = [];
   for (const id of before.keys()) {
     if (id.includes("/") || top.has(id)) continue;
-    const into = parent.get(id);
+    // A comb cell is listed by its tag: a field grouped into a comb is found by it.
+    const into =
+      parent.get(id) ?? now.find((r) => r.comb_cells?.some((c) => id.startsWith(c.tag)))?.id;
     if (into) moved.push({ id, into });
     else removed.push(id);
   }
@@ -320,6 +419,8 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
       hint: `Pages with fields: ${pages.join(", ") || "none"}.`,
     });
   }
+  // The tags keep off the page's print (the blank's text layer; none on a scan).
+  const printed = overlay === "full" ? await printedBoxes(a.pdfBytes, [a.page]) : undefined;
   let res: Awaited<ReturnType<typeof fillAgentPdf>>;
   try {
     res = await fillAgentPdf({
@@ -336,6 +437,7 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
       // cover the top of page 1.
       checkBanner: false,
       checkTags: overlay === "full",
+      checkPrinted: printed,
     });
   } catch (e) {
     if (isPasswordError(e)) throw passwordError();
@@ -384,7 +486,14 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
           c.y < r.box.y + r.box.h
         );
       })
-    : legend;
+    : // A whole page lists its combs without their cells: a dense page's
+      // legend would outgrow what a client takes in one result (the PL licence
+      // page 1, 74 fields, passed 25k tokens). A crop lists them.
+      legend.map((r) => {
+        if (!r.comb_cells) return r;
+        const { comb_cells: _cells, ...rest } = r;
+        return rest;
+      });
   return {
     png: encodePng(raster),
     width: raster.width,

@@ -273,7 +273,17 @@ export class EchoGuard {
    *  working copy the wording is in: an entry named in one copy is not thereby
    *  named in another (section ids, and a copied template's ids, repeat). */
   check(
-    wording: readonly { id: string; page?: number; prop?: string; text: string }[],
+    wording: readonly {
+      id: string;
+      page?: number;
+      prop?: string;
+      text: string;
+      /** Wording nobody sees (a comb cell's label): a placeholder there ("D1")
+       *  equal to an answer shorter than ECHO_REFUSE_MIN is not warned about;
+       *  one equal to a longer answer ("SW1A", "1234") or holding one of
+       *  ECHO_CONTAINS_MIN+ characters is refused as anywhere else. */
+      quiet?: boolean;
+    }[],
     scope = "",
   ): Screened {
     const refuse = new Set<string>();
@@ -287,7 +297,7 @@ export class EchoGuard {
       let hit = false;
       if (this.seen.has(n)) {
         if (n.length < ECHO_REFUSE_MIN) {
-          warn.add(w.id);
+          if (!w.quiet) warn.add(w.id);
           continue;
         }
         hit = true;

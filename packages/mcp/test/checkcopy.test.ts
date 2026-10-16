@@ -20,7 +20,7 @@ import { ToolError } from "../src/errors.js";
 import { loadImage, stampAndWrite } from "../src/fill.js";
 import { loadFonts, toArrayBuffer } from "../src/fonts.js";
 import { PREVIEW_MAX_SIDE_PX, previewPage } from "../src/preview.js";
-import { pageText } from "../src/render.js";
+import { pageText, printedBoxes } from "../src/render.js";
 import type { RenderSchema } from "../src/types.js";
 import { fixture, pdfFor, tmp } from "./helpers.js";
 
@@ -193,6 +193,148 @@ describe("preview overlay", () => {
     const byDefault = await shot(render, pdf);
     const full = await shot(render, pdf, "full");
     expect(Buffer.from(byDefault.png).equals(Buffer.from(full.png))).toBe(true);
+  });
+});
+
+describe("check copy tags keep off the print", () => {
+  // A dense option row, as on the Schengen form's question 10: each tick box
+  // printed just before its caption, a line of text just above the row and one
+  // just below, so a tag fits only beside a box, on the side away from its caption.
+  const W = 595;
+  const H = 842;
+  const opt = (id: string, label: string, xpct: number) => ({
+    id,
+    label,
+    type: "checkbox",
+    page: 1,
+    section_id: null,
+    xpct,
+    ypct: 30,
+    wpct: 1.5,
+    hpct: 1.1,
+    group: "gq1111",
+  });
+  const options = [
+    opt("o1aaaa", "Single", 10),
+    opt("o2bbbb", "Married", 22),
+    opt("o3cccc", "Divorced", 34),
+  ];
+  const render = {
+    version: 5,
+    pages: [{ page: 1, width: W, height: H, image: "", sections: [] }],
+    fields: options,
+    groups: [
+      {
+        id: "gq1111",
+        kind: "choice",
+        format: "single",
+        label: "Civil status",
+        page: 1,
+        members: ["o1aaaa", "o2bbbb", "o3cccc"],
+      },
+    ],
+  } as unknown as RenderSchema;
+  const blank = async () => {
+    const { PDFDocument, StandardFonts } = await import("pdf-lib");
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([W, H]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const top = (pct: number) => H - (pct / 100) * H;
+    const boxBottom = top(31.1);
+    for (const f of options) {
+      // The caption right after its box, on the box's line.
+      page.drawText(f.label, {
+        x: ((f.xpct + f.wpct) / 100) * W + 1,
+        y: boxBottom + 1.5,
+        size: 10,
+        font,
+      });
+    }
+    const line = "Civil status of the applicant on the date the application is made";
+    page.drawText(line, { x: 0.1 * W, y: top(30) + 4, size: 10, font });
+    page.drawText(line, { x: 0.1 * W, y: boxBottom - 11, size: 10, font });
+    return doc.save();
+  };
+  /** The glyph boxes of a page in points (top-left origin). */
+  const glyphs = async (pdf: Uint8Array) =>
+    (await pageText(pdf, 1)).glyphs.map((g) => ({
+      x: g.x * W,
+      y: g.y * H,
+      w: g.w * W,
+      h: g.h * H,
+      char: g.char,
+    }));
+  const meet = (
+    a: { x: number; y: number; w: number; h: number },
+    b: { x: number; y: number; w: number; h: number },
+  ) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+  it("draws every option's tag clear of the captions, the lines and the stamped tick", async () => {
+    const pdf = await blank();
+    const printed = await glyphs(pdf);
+    const res = await fillAgentPdf({
+      pdfBytes: toArrayBuffer(pdf),
+      render,
+      input: { gq1111: "Married" },
+      fonts: loadFonts(),
+      branding: null,
+      logoBytes: null,
+      loadImage,
+      check: true,
+      checkBanner: false,
+      checkPrinted: await printedBoxes(pdf, [1]),
+    });
+    expect(res.filled).toBe(1);
+    // The tags are the 5 pt text; the print is 10 pt.
+    const tags = (await glyphs(res.checkPdf!)).filter((g) => g.h < 5);
+    expect(tags.map((g) => g.char).join("")).toHaveLength(4 * 6); // three options + the group
+    const tick = { x: 0.22 * W, y: 0.3 * H, w: 0.015 * W, h: 0.011 * H };
+    for (const t of tags) {
+      expect(printed.some((p) => meet(t, p))).toBe(false);
+      expect(meet(t, tick)).toBe(false);
+    }
+  });
+
+  it("preview_page's default overlay reads the page's print itself", async () => {
+    const pdf = await blank();
+    const shown = await previewPage({
+      pdfBytes: pdf,
+      render,
+      page: 1,
+      values: { gq1111: "Married" },
+      fonts: loadFonts(),
+      dpi: 72,
+    });
+    expect(isPng(shown.png)).toBe(true);
+    expect(shown.filled).toBe(1);
+  });
+});
+
+describe("preview legend size", () => {
+  it("lists a comb's cells in a crop, not on a whole page", async () => {
+    const render = fixture("canonical").render;
+    const pdf = await pdfFor(render);
+    const whole = await previewPage({
+      pdfBytes: pdf,
+      render,
+      page: 1,
+      values: {},
+      fonts: loadFonts(),
+      dpi: 72,
+    });
+    const comb = whole.legend.find((r) => r.id === "g-comb")!;
+    expect(comb).toMatchObject({ max_length: 4, date_format: "DDMM" });
+    expect(comb.comb_cells).toBeUndefined();
+    const crop = await previewPage({
+      pdfBytes: pdf,
+      render,
+      page: 1,
+      values: {},
+      fonts: loadFonts(),
+      dpi: 72,
+      crop: { x: 0, y: 0.45, w: 1, h: 0.1 },
+    });
+    expect(crop.legend.find((r) => r.id === "g-comb")?.comb_cells).toHaveLength(4);
   });
 });
 
