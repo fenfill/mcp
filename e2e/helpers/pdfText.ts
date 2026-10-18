@@ -126,3 +126,13 @@ export async function pageImageSizes(
   }
   return out;
 }
+
+// The decoded content streams of every page, joined: a literal oracle for text drawn with a
+// standard font (e.g. a Helvetica watermark), which appears as plain `(…) Tj` strings.
+export async function allPageContent(pdfBytes: Uint8Array): Promise<string> {
+  const doc = await PDFDocument.load(pdfBytes);
+  let content = "";
+  for (let i = 0; i < doc.getPageCount(); i++)
+    for (const s of collectPageStreams(doc, i)) content += rawStreamToLatin1(s) + "\n";
+  return content;
+}

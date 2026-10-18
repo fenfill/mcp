@@ -12,8 +12,9 @@ are stamped into the PDF locally and are never sent to fenfill or anywhere else.
    fields (text boxes, checkboxes, dates, character boxes, tables, signatures) and returns them
    with ids, types and labels. The result is cached on your machine, so asking again is free.
 2. **`fill_form`** takes the agent's answers (`field id → value`), checks them against the
-   fields, and stamps them into a new, flattened PDF. This step runs entirely on your machine,
-   with no network at all.
+   fields, and stamps them into a new, flattened PDF. This step runs on your machine and never
+   sends your answers anywhere; the only network use is a one-time download of the public
+   Japanese font, the first time a value needs it.
 3. Saved fenfill templates work the same way: `list_templates` → `get_template` → `fill_template`.
 4. **`preview_page`** shows a page as an image with every field box outlined and tagged, rendered
    on your machine. If a box is misplaced, missing or mislabeled, **`edit_template`** fixes it in a
@@ -24,15 +25,16 @@ are stamped into the PDF locally and are never sent to fenfill or anywhere else.
 
 ### What is sent where
 
-| Data                                               | Sent to fenfill?                                                             |
-| -------------------------------------------------- | ---------------------------------------------------------------------------- |
-| The blank PDF you analyze                          | Yes, once (then cached locally)                                              |
-| Your API key                                       | Yes, as `Authorization: Bearer`                                              |
-| The agent's answers, signatures and the filled PDF | **No, never**                                                                |
-| Saved templates (blank PDF, fields, your logo)     | Downloaded from fenfill to fill locally                                      |
-| Page previews (`preview_page`)                     | **No**: rendered on your machine                                             |
-| Layout corrections (`edit_template`)               | Only on `save_template`, and then only the layout and the form's own wording |
-| Re-analysis (`reanalyze_template`)                 | Only the template id, pages, kind and version: nothing is uploaded           |
+| Data                                               | Sent to fenfill?                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The blank PDF you analyze                          | Yes, once (then cached locally)                                                                                                                                                                                                                                                     |
+| Your API key                                       | Yes, as `Authorization: Bearer`                                                                                                                                                                                                                                                     |
+| The agent's answers, signatures and the filled PDF | **No, never**                                                                                                                                                                                                                                                                       |
+| Saved templates (blank PDF, fields, your logo)     | Downloaded from fenfill to fill locally                                                                                                                                                                                                                                             |
+| Page previews (`preview_page`)                     | **No**: rendered on your machine                                                                                                                                                                                                                                                    |
+| Layout corrections (`edit_template`)               | Only on `save_template`, and then only the layout and the form's own wording                                                                                                                                                                                                        |
+| Re-analysis (`reanalyze_template`)                 | Only the template id, pages, kind and version: nothing is uploaded                                                                                                                                                                                                                  |
+| Japanese font download                             | `GET https://fenfill.com/fonts/NotoSansJP-Regular.ttf`, once, only when a value contains Japanese. Sends no auth and no form data, just a plain GET with a `fenfill-mcp/<version>` User-Agent. Redirects to another host are refused. Checked against a pinned sha256, then cached. |
 
 `analyze_form` refuses PDFs whose form fields already hold answers, and PDFs this server wrote
 itself, so a filled-in form isn't uploaded by mistake.
@@ -91,20 +93,20 @@ On native Windows, if the client can't find `npx`, use `"command": "cmd"` with
 
 ## Tools
 
-| Tool                    | What it does                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------- |
-| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards. |
-| `fill_form`             | Fills an analyzed PDF locally, offline, and writes a new flattened PDF.         |
-| `fill_template`         | Fills a saved fenfill template locally.                                         |
-| `list_templates`        | Lists the workspace's saved templates, newest first.                            |
-| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                 |
-| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template.        |
-| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                  |
-| `get_account`           | Shows the plan, page scans left and limits.                                     |
-| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.       |
-| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.   |
-| `save_template`         | Saves `edit_template`'s working copy to a saved template.                       |
-| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff. |
+| Tool                    | What it does                                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards.                       |
+| `fill_form`             | Fills an analyzed PDF locally (your answers never leave your machine) and writes a new flattened PDF. |
+| `fill_template`         | Fills a saved fenfill template locally.                                                               |
+| `list_templates`        | Lists the workspace's saved templates, newest first.                                                  |
+| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                                       |
+| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template.                              |
+| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                                        |
+| `get_account`           | Shows the plan, page scans left and limits.                                                           |
+| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.                             |
+| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.                         |
+| `save_template`         | Saves `edit_template`'s working copy to a saved template.                                             |
+| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff.                       |
 
 `analyze_form` options: `pages` (e.g. `"1-3,5"`; long PDFs can be analyzed in chunks, and
 `fill_form` merges them), `save_as_template` (also keep it as a fenfill template), `access`
@@ -390,6 +392,14 @@ fenfill web app for that workspace (for example, your logo if you have set one u
   working copy holds the layout plus the wording the agent wrote with `edit_template`; the echo
   guard refuses wording that repeats an answer seen in the same session before it is written,
   unless the agent, told which property matched, confirms that it is the form's own wording.
+- **`fonts/`** in the cache holds the Japanese font (Noto Sans JP, about 5.8 MB), downloaded the
+  first time a value needs it and never aged out. To work offline, copy
+  `NotoSansJP-Regular.ttf` (from `https://fenfill.com/fonts/NotoSansJP-Regular.ttf`) into
+  `<cache>/fonts/` (`FENFILL_CACHE_DIR` if you set it); it is used if its sha256 matches the
+  pinned value.
+- **Supported scripts:** Latin, Cyrillic and Greek; Hebrew and Arabic (printed right to left,
+  Arabic joined); Japanese (kana, kanji and other CJK ideographs, CJK punctuation and full-width
+  forms, plus symbols such as ⑪ and 〈〉) through the on-demand font above.
 - **Cache cleanup:** at startup and at most once a day it deletes blank PDFs and the logo after
   1 hour, analyses and working copies unused for 90 days, stale job records after 48 hours, and
   output hashes after a year.
@@ -402,28 +412,29 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 
 ## Troubleshooting
 
-| Error                                 | What to do                                                                                                                                                                                                                                                    |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `missing_api_key` / `invalid_api_key` | Set `FENFILL_API_KEY` in the client's config and restart the client.                                                                                                                                                                                          |
-| `plan_required`                       | The workspace needs a paid plan (Pro and up).                                                                                                                                                                                                                 |
-| `insufficient_scans`                  | Not enough page scans left; analyze fewer `pages` or check `get_account`.                                                                                                                                                                                     |
-| `prefilled_form` / `filled_output`    | Only blank forms can be analyzed; use the original, empty PDF. If it is the blank form (some ship with default text in their fields), use the fenfill web app.                                                                                                |
-| `pdf_password_required`               | Remove the open password first; owner-password PDFs work as they are.                                                                                                                                                                                         |
-| `pdf_fill_forbidden`                  | The PDF's author forbids form filling; fenfill won't fill it. Use a copy that allows filling.                                                                                                                                                                 |
-| `not_analyzed`                        | Run `analyze_form` on the same file (and pages) before `fill_form`.                                                                                                                                                                                           |
-| `output_exists`                       | Pick a new `output_path` or pass `overwrite: true`.                                                                                                                                                                                                           |
-| `rate_limited` / `queue_full`         | `analyze_form` already waited about a minute (`waited_s`); try again later.                                                                                                                                                                                   |
-| `too_many_active_jobs`                | Other analyses in the workspace (free native-field ones too) are still running; try again in a minute, or analyze fewer at once.                                                                                                                              |
-| `template_conflict`                   | The template changed in fenfill since your edits began. Your local edits are kept: `edit_template` with `discard: true`, re-apply the ops, save again.                                                                                                        |
-| `invalid_schema`                      | fenfill (or the local check before it) refused the edited layout; `details` lists each item and reason. Fix them with `edit_template`.                                                                                                                        |
-| `check_copy_failed`                   | `preview_page` could not build its outlined copy; `stage` and `id` say where. Fix or remove that field or group with `edit_template`, then preview again; `overlay: "none"` still shows the page meanwhile.                                                   |
-| `request_too_large`                   | The edited template is too large to save in one request.                                                                                                                                                                                                      |
-| `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent; `matched` lists the ids and properties. An answer: put the form's own wording back with `edit_template`. The form's own wording: `save_template` again with `confirm_wording: true`. |
-| `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.                                                                                                     |
-| `local_edits_pending`                 | `reanalyze_template` won't run over unsaved edits: `save_template` them first, or pass `discard: true`.                                                                                                                                                       |
-| `kind_required`                       | The pages already have fields: pass `kind` (`find`, `relabel`, `label_missing`, or `scratch` to replace them).                                                                                                                                                |
-| `job_in_progress`                     | A job is already running on the template; wait and retry (call `reanalyze_template` again with the same arguments if you started it).                                                                                                                         |
-| `upload_outcome_unknown`              | An earlier upload was interrupted. To avoid charging twice, the same file isn't re-uploaded for about 10 minutes; check `get_account` meanwhile.                                                                                                              |
+| Error                                 | What to do                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `missing_api_key` / `invalid_api_key` | Set `FENFILL_API_KEY` in the client's config and restart the client.                                                                                                                                                                                                                                                                                                        |
+| `plan_required`                       | The workspace needs a paid plan (Pro and up).                                                                                                                                                                                                                                                                                                                               |
+| `insufficient_scans`                  | Not enough page scans left; analyze fewer `pages` or check `get_account`.                                                                                                                                                                                                                                                                                                   |
+| `prefilled_form` / `filled_output`    | Only blank forms can be analyzed; use the original, empty PDF. If it is the blank form (some ship with default text in their fields), use the fenfill web app.                                                                                                                                                                                                              |
+| `pdf_password_required`               | Remove the open password first; owner-password PDFs work as they are.                                                                                                                                                                                                                                                                                                       |
+| `pdf_fill_forbidden`                  | The PDF's author forbids form filling; fenfill won't fill it. Use a copy that allows filling.                                                                                                                                                                                                                                                                               |
+| `unsupported_script`                  | A value needs Japanese characters (text, comb or a checkbox symbol like 〇) and the font could not be loaded; `ids` lists the fields and `details.reason` why (`network`, `http_status`, `hash_mismatch`, `timeout`, `too_large`). Connect once and retry, or pre-seed the font (see Files and privacy). The check spans the whole document, so `preview_page` refuses too. |
+| `not_analyzed`                        | Run `analyze_form` on the same file (and pages) before `fill_form`.                                                                                                                                                                                                                                                                                                         |
+| `output_exists`                       | Pick a new `output_path` or pass `overwrite: true`.                                                                                                                                                                                                                                                                                                                         |
+| `rate_limited` / `queue_full`         | `analyze_form` already waited about a minute (`waited_s`); try again later.                                                                                                                                                                                                                                                                                                 |
+| `too_many_active_jobs`                | Other analyses in the workspace (free native-field ones too) are still running; try again in a minute, or analyze fewer at once.                                                                                                                                                                                                                                            |
+| `template_conflict`                   | The template changed in fenfill since your edits began. Your local edits are kept: `edit_template` with `discard: true`, re-apply the ops, save again.                                                                                                                                                                                                                      |
+| `invalid_schema`                      | fenfill (or the local check before it) refused the edited layout; `details` lists each item and reason. Fix them with `edit_template`.                                                                                                                                                                                                                                      |
+| `check_copy_failed`                   | `preview_page` could not build its outlined copy; `stage` and `id` say where. Fix or remove that field or group with `edit_template`, then preview again; `overlay: "none"` still shows the page meanwhile.                                                                                                                                                                 |
+| `request_too_large`                   | The edited template is too large to save in one request.                                                                                                                                                                                                                                                                                                                    |
+| `answer_in_template`                  | Edited wording matches an answer from this session, so nothing was sent; `matched` lists the ids and properties. An answer: put the form's own wording back with `edit_template`. The form's own wording: `save_template` again with `confirm_wording: true`.                                                                                                               |
+| `confirm_wording_needed`              | The working copy has wording edited in an earlier session. Review the ids and properties in `changed`, then `save_template` with `confirm_wording: true`.                                                                                                                                                                                                                   |
+| `local_edits_pending`                 | `reanalyze_template` won't run over unsaved edits: `save_template` them first, or pass `discard: true`.                                                                                                                                                                                                                                                                     |
+| `kind_required`                       | The pages already have fields: pass `kind` (`find`, `relabel`, `label_missing`, or `scratch` to replace them).                                                                                                                                                                                                                                                              |
+| `job_in_progress`                     | A job is already running on the template; wait and retry (call `reanalyze_template` again with the same arguments if you started it).                                                                                                                                                                                                                                       |
+| `upload_outcome_unknown`              | An earlier upload was interrupted. To avoid charging twice, the same file isn't re-uploaded for about 10 minutes; check `get_account` meanwhile.                                                                                                                                                                                                                            |
 
 ## API
 

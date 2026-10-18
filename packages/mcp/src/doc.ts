@@ -51,6 +51,8 @@ export interface Doc {
   section: Map<string, number>;
   /** The batch's refs (`ref` on an op that adds something): name → the new id. */
   refs?: Map<string, string>;
+  /** The batch's choice groups: group id → the ids in the order its group op gave them. */
+  batchGroups?: Map<string, string[]>;
 }
 
 /** A ref an op may take: a letter, then letters, digits, "_" or "-". */

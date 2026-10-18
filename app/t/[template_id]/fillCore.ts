@@ -33,6 +33,7 @@ export {
   type NestedOwner,
   prefilledAcroFieldCount,
   prefixHits,
+  UnsupportedScriptError,
 } from "./agentValues";
 export {
   bucketRows,
@@ -47,5 +48,6 @@ export {
   splitMulti,
 } from "./fillKeys";
 export { buildMarks, type BuildMarksArgs } from "./fillMarks";
+export { JP_FACE_BYTES, JP_FACE_SHA256 } from "./fontRuns";
 export { normalizeSchema } from "./normalizeSchema";
 export { type Mark, type Placement, type StampOptions, stampPdf } from "./stampPdf";

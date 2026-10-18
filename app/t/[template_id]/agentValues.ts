@@ -21,6 +21,7 @@ import type { PDFDict, PDFDocument, PDFObject } from "pdf-lib";
 
 import { type Field, type Group, groupFormatOf, type TemplateSchema } from "@/types";
 
+import { needsBidi, stampsRtl, stripBidiControls } from "./bidiText";
 import { combDateWrites, combEntries, type CombSlot, combSlots, isDmyFormat } from "./combFill";
 import {
   bucketRows,
@@ -33,9 +34,10 @@ import {
   resolveMembers,
 } from "./fillKeys";
 import { buildMarks } from "./fillMarks";
+import { marksNeedJpFace, needsJpFace } from "./fontRuns";
 import { normalizeSchema } from "./normalizeSchema";
 import { dataUrlToBytes } from "./signatureImage";
-import { embedStampFaces, type Mark, type Placement, stampPdf } from "./stampPdf";
+import { embedStampFaces, type Mark, type Placement, type StampFonts, stampPdf } from "./stampPdf";
 
 /** Info-dictionary key the MCP writes into every PDF it fills (and refuses to analyze). */
 export const MCP_OUTPUT_TAG = "FenfillMcpOutput";
@@ -1221,7 +1223,7 @@ async function buildCheckPdf(
   stamped: Uint8Array,
   entries: readonly AgentEntry[],
   status: (id: string) => CheckStatus,
-  fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
+  fonts: StampFonts,
   banner = true,
   tags = true,
   avoid: TagObstacles = {},
@@ -1332,7 +1334,7 @@ async function drawCheckPdf(
   stamped: Uint8Array,
   entries: readonly AgentEntry[],
   status: (id: string) => CheckStatus,
-  fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
+  fonts: StampFonts,
   banner: boolean,
   tags: boolean,
   avoid: TagObstacles,
@@ -1475,6 +1477,9 @@ async function drawCheckPdf(
     const { default: fontkit } = await import("@pdf-lib/fontkit");
     doc.registerFontkit(fontkit);
     const faces = await embedStampFaces(doc, fontkit, fonts);
+    // A Hebrew/Arabic header goes through the stamp's RTL layer (shaped, then
+    // reordered to visual order), loaded only when one is drawn.
+    const rtlLayer = wanted.some((h) => needsBidi(h.text)) ? await import("./rtlStamp") : undefined;
     const unreadable = new Set<string>();
     for (const h of wanted) {
       step("table headers", h.gid);
@@ -1493,32 +1498,52 @@ async function drawCheckPdf(
         const room = inside ? w - 1 : prefix === "R" ? Math.min(120, cx - 1) : Math.max(2 * w, 30);
         // By code point (no split surrogate pairs). A character neither face has
         // would print as an empty box: show "?" and say so, once per table.
-        const chars = Array.from(`${prefix}: ${h.text}`, (ch) =>
+        const chars = Array.from(h.text, (ch) =>
           faces.hasGlyph(ch.codePointAt(0) ?? 0) ? ch : "?",
         );
-        if (chars.join("") !== `${prefix}: ${h.text}` && !unreadable.has(h.gid)) {
+        if (chars.join("") !== h.text && !unreadable.has(h.gid)) {
           unreadable.add(h.gid);
           notes.push(
             `${h.gid}: the check copy cannot draw some header characters (shown as "?"); the legend's header_rows / header_cols hold the full text`,
           );
         }
+        // A Hebrew/Arabic header (stampsRtl: its own first strong character, not
+        // the Latin prefix's) reads right to left, so its prefix is isolated
+        // left to right ("R:" at the right end, read first) and a cut's "…"
+        // follows the kept words on the left.
+        const bidi = rtlLayer && needsBidi(h.text) ? rtlLayer : undefined;
+        const rtl = stampsRtl(h.text);
+        const lead = rtl ? `\u2066${prefix}:\u2069 ` : `${prefix}: `;
+        // What is drawn is measured: shaped, and without the controls the bidi
+        // path drops (a header with no RTL letter measures as before).
+        const shaped = (t: string) => (bidi ? bidi.shapeArabic(t) : t);
+        const width = (t: string) =>
+          faces.measure(bidi ? stripBidiControls(bidi.shapeArabic(t)) : t, HEAD);
         // Too wide: the longest prefix that fits, plus "…", found by bisection
         // (one text layout per probe, not one per dropped character). The
         // 3-character "R: …" is kept even when that is still too wide.
-        const cut = (n: number) => `${chars.slice(0, n).join("")}…`;
-        let text = chars.join("");
-        if (chars.length > 4 && faces.measure(text, HEAD) > room) {
-          let lo = 3;
+        const cut = (n: number) => `${lead}${chars.slice(0, n).join("")}…`;
+        let text = `${lead}${chars.join("")}`;
+        if (chars.length > 1 && width(text) > room) {
+          let lo = 0;
           let hi = chars.length - 2;
           while (lo < hi) {
             const mid = Math.ceil((lo + hi) / 2);
-            if (faces.measure(cut(mid), HEAD) <= room) lo = mid;
+            if (width(cut(mid)) <= room) lo = mid;
             else hi = mid - 1;
           }
           text = cut(lo);
         }
-        const tw = faces.measure(text, HEAD);
-        const x = inside ? cx + 0.6 : prefix === "R" ? cx - tw - 0.8 : cx;
+        const body = shaped(text);
+        const tw = width(text);
+        // Inside the cell an RTL header starts at the cell's right edge.
+        const x = inside
+          ? rtl
+            ? cx + w - 0.6 - tw
+            : cx + 0.6
+          : prefix === "R"
+            ? cx - tw - 0.8
+            : cx;
         const y = inside
           ? top - HEAD - 0.4 - h.below
           : prefix === "R"
@@ -1527,7 +1552,11 @@ async function drawCheckPdf(
         heads.push({
           head: h,
           draw: () => {
-            faces.draw(page, text, x, y, HEAD, headColor);
+            if (bidi) {
+              faces.drawVisual(page, bidi.visualLine(body, rtl), x, y, HEAD, headColor);
+            } else {
+              faces.draw(page, text, x, y, HEAD, headColor);
+            }
           },
         });
         // Reserve the spot: the id tags placed next steer clear of it.
@@ -1713,12 +1742,25 @@ async function drawCheckPdf(
   return { pdf: await doc.save(), notes };
 }
 
+/** A fill whose values need the JP face when `fonts.jp` wasn't given: outside a
+ *  browser the stamp can't fetch it, so the fill is refused rather than printed
+ *  as tofu. `ids` are the offending fields' agent ids, in mark order. */
+export class UnsupportedScriptError extends Error {
+  readonly ids: string[];
+
+  constructor(ids: string[]) {
+    super(`These values need a Japanese font that wasn't provided: ${ids.join(", ")}`);
+    this.name = "UnsupportedScriptError";
+    this.ids = ids;
+  }
+}
+
 export interface FillAgentPdfArgs {
   pdfBytes: ArrayBuffer;
   /** The raw v5 schema_json, exactly as /v1 returns it under ?include=render. */
   render: unknown;
   input: Record<string, unknown>;
-  fonts: { inter: ArrayBuffer; deja: ArrayBuffer };
+  fonts: StampFonts;
   branding: { watermark: boolean; logoUrl: string | null } | null;
   logoBytes: ArrayBuffer | null;
   loadImage: LoadImage;
@@ -1766,6 +1808,15 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
     values: m.values,
     rowCounts: m.rowCounts,
   });
+  // The whole document, not just the pages a caller looks at: stampPdf's own
+  // fallback fetches the face by relative URL, which only resolves on the web.
+  if (!a.fonts.jp && marksNeedJpFace(marksByPage)) {
+    const ids = new Set<string>();
+    for (const marks of marksByPage.values()) {
+      for (const mk of marks) if (needsJpFace(mk.text)) ids.add(ownerOf(mk.key, m.keyIds));
+    }
+    throw new UnsupportedScriptError([...ids]);
+  }
   const placements: Placement[] = [];
   const pdf = await stampPdf({
     pdfBytes: a.pdfBytes,

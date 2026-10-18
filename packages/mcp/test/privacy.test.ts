@@ -2,7 +2,7 @@
 // distinctive sentinel values, proves no sentinel reaches a request (URL,
 // headers, body), stderr/console, or any file under FENFILL_CACHE_DIR.
 
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -301,4 +301,72 @@ describe("sentinel recorder over every tool", () => {
       expect(statSync(f).isFile()).toBe(true);
     }
   });
+});
+
+describe("the Japanese font download", () => {
+  it.skipIf(!existsSync(join(__dirname, "../../../public/fonts/NotoSansJP-Regular.ttf")))(
+    "is the only non-API request: a bare GET, only for Japanese values, no values in it",
+    async () => {
+      const face = new Uint8Array(
+        readFileSync(join(__dirname, "../../../public/fonts/NotoSansJP-Regular.ttf")),
+      );
+      const fx = fixture("ungrouped_fields");
+      const cityId = fx.agent.fields.find((e) => e.label === "City")!.id;
+      const pdfPath = join(t.dir, "form.pdf");
+      writeFileSync(pdfPath, await pdfFor(fx.render));
+      const mock = new MockApi().analyzeFlow({
+        jobId: JOB,
+        render: fx.render,
+        agent: fx.agent,
+        pages: [1, 2],
+      });
+      const fontCalls: { url: string; init: RequestInit }[] = [];
+      const fontFetchImpl = ((url: string, init: RequestInit) => {
+        fontCalls.push({ url: String(url), init });
+        return Promise.resolve(new Response(new Uint8Array(face)));
+      }) as unknown as typeof fetch;
+      const c = await connect({
+        env: env(join(t.dir, "cache")),
+        fetchImpl: mock.fetch,
+        fontFetchImpl,
+        jpFontUrl: "https://fonts.test.invalid/NotoSansJP-Regular.ttf",
+      });
+      try {
+        expect((await c.call("analyze_form", { path: pdfPath })).data.status).toBe("done");
+        const latin = await c.call("fill_form", {
+          path: pdfPath,
+          values: { [cityId]: SENTINELS[4] },
+          output_path: join(t.dir, "latin.pdf"),
+        });
+        expect(latin.isError).toBe(false);
+        expect(fontCalls).toHaveLength(0);
+
+        const jp = "プライバシー東京";
+        const r = await c.call("fill_form", {
+          path: pdfPath,
+          values: { [cityId]: jp },
+          output_path: join(t.dir, "jp.pdf"),
+        });
+        expect(r.isError).toBe(false);
+        expect(fontCalls).toHaveLength(1);
+        const call = fontCalls[0];
+        expect(call.url).toBe("https://fonts.test.invalid/NotoSansJP-Regular.ttf");
+        expect(call.url).not.toContain(encodeURIComponent(jp));
+        expect(call.init.method).toBe("GET");
+        expect(call.init.body).toBeUndefined();
+        const headers = Object.keys((call.init.headers ?? {}) as Record<string, string>).map((h) =>
+          h.toLowerCase(),
+        );
+        expect(headers).toEqual(["user-agent"]);
+        expect(JSON.stringify(call.init)).not.toContain(jp);
+        // The API client saw only API calls, none of them the font or a value.
+        for (const m of mock.calls) {
+          expect(m.url).toContain("api.test.invalid");
+          expect(m.url + JSON.stringify(m.headers) + m.body).not.toContain(jp);
+        }
+      } finally {
+        await c.close();
+      }
+    },
+  );
 });

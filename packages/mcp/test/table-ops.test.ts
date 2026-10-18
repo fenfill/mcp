@@ -298,6 +298,49 @@ describe("set_column_type / set_orientation / set_header / set_format on a cell"
     expect(r.warnings).toEqual([]);
     expect(G_(r.render, gid).grid as unknown[][]).toHaveLength(2);
   });
+
+  it("a table whose stored columns mix text and multiline can be fixed one column at a time", () => {
+    const ml = { format: { variant: "multiline" } };
+    const cells = [
+      [fld("tttttt01-a0", 10, 20), fld("tttttt01-b0", 40, 20, ml)],
+      [fld("tttttt02-a1", 10, 25, ml), fld("tttttt02-b1", 40, 25)],
+      [fld("tttttt03-a2", 10, 30, ml), fld("tttttt03-b2", 40, 30, ml)],
+    ];
+    const grid = cells.map((row) => row.map((f) => f.id));
+    for (const f of cells.flat()) f.group = "tttttt-table";
+    const s = {
+      version: 5,
+      pages: loose().pages,
+      fields: cells.flat(),
+      groups: [
+        {
+          id: "tttttt-table",
+          kind: "table",
+          format: "classic",
+          orientation: "col",
+          label: "Entries",
+          page: 1,
+          rows: 3,
+          cols: 2,
+          grid,
+          members: grid.flat(),
+        } as G,
+      ],
+    } as RenderSchema;
+    const r = applyOps(s, [
+      { op: "set_format", id: "tttttt01-a0", format: { variant: "multiline" } },
+    ]);
+    expect(r.rejected).toEqual([]);
+    for (const id of ["tttttt01-a0", "tttttt02-a1", "tttttt03-a2"])
+      expect(F_(r.render, id).format).toMatchObject({ variant: "multiline" });
+    expect(r.warnings.join(" ")).toMatch(/table tttttt-table: column 1 still stores? mixed types/);
+    const r2 = applyOps(r.render, [
+      { op: "set_column_type", id: "tttttt-table", index: 1, type: "text" },
+    ]);
+    expect(r2.rejected).toEqual([]);
+    expect(r2.warnings.join(" ")).not.toMatch(/mixed types/);
+    expect(F_(r2.render, "tttttt01-b0").format).toMatchObject({ variant: "any" });
+  });
 });
 
 describe("choice options", () => {

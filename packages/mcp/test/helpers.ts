@@ -429,7 +429,12 @@ export async function connect(
   opts: ServerOptions & { tap?: (message: unknown) => void } = {},
 ): Promise<Connected> {
   const { tap, ...serverOpts } = opts;
-  const { server, shutdown } = createFenfillServer({ fontsDir: FONTS_DIR, ...serverOpts });
+  const { server, shutdown } = createFenfillServer({
+    fontsDir: FONTS_DIR,
+    // No test reaches the network: the Japanese face download fails offline.
+    fontFetchImpl: () => Promise.reject(new TypeError("fetch failed (tests are offline)")),
+    ...serverOpts,
+  });
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   if (tap) {
     // Every message the server sends (results, notifications) passes the tap.

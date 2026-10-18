@@ -9,6 +9,8 @@
 //   outputs/<sha>                               older than 365 days (the PDF's own
 //                                               Info tag is the primary guard)
 //   edits/*.json                                not edited for 90 days
+//   fonts/NotoSansJP-Regular.ttf                never (downloaded once, jpFont.ts);
+//                                               only a crashed write's temp file
 //
 // Ages come from file mtimes (analyses are touched when served) against the
 // injected clock; pending entries use their own created_at.
@@ -121,6 +123,11 @@ export async function sweepCache(cache: Cache, now: number): Promise<number> {
   await each(await names(join(root, "edits")), async (n) => {
     const max = n.startsWith(".") ? LEFTOVER_MS : FORM_UNUSED_MS;
     count(await dropIfOld(join(root, "edits", n), now, max));
+  });
+
+  // The Japanese face is kept for good; only a crashed download's temp file goes.
+  await each(await names(join(root, "fonts")), async (n) => {
+    if (n.startsWith(".")) count(await dropIfOld(join(root, "fonts", n), now, LEFTOVER_MS));
   });
 
   // Output markers: a year.

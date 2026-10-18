@@ -13,6 +13,6 @@
     "moduleResolution": "bundler",
     "paths": { "@/*": ["../../*"] }
   },
-  "include": ["src", "test", "vitest.config.ts"],
+  "include": ["src", "test", "vitest.config.ts", "../../typings"],
   "exclude": ["node_modules", "dist"]
 }

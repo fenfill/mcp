@@ -13,9 +13,17 @@ import {
   MULTILINE_DEFAULT_FONT_SIZE,
 } from "@/types";
 
+import { bidiAnchor, isRtlDominant, marksNeedBidi, needsBidi, stripBidiControls } from "./bidiText";
 import type { Pct } from "./coords";
 import { flattenFormFields } from "./flattenForm";
-import { splitByCoverage } from "./fontRuns";
+import {
+  inJpFaceRange,
+  joinsJpRun,
+  marksNeedJpFace,
+  type RunDirection,
+  splitByCoverage,
+  splitByDirection,
+} from "./fontRuns";
 import { classifyMark, MARK_LINES, MARK_SQUARE, MARK_STROKE, type MarkShape } from "./markGeometry";
 import { dataUrlToBytes } from "./signatureImage";
 import {
@@ -86,7 +94,8 @@ export interface StampOptions {
   // Pre-fetched font bytes. When provided the two /fonts fetches are skipped —
   // a batch caller (mass fill) fetches once per batch instead of twice per
   // document. Absent => the historical per-call fetch, byte-identical output.
-  fonts?: { inter: ArrayBuffer; deja: ArrayBuffer };
+  // `jp` is used only when a mark needs it; absent => loadJpStampFace.
+  fonts?: StampFonts;
   // Pre-fetched workspace-logo bytes: same batch optimization for
   // branding.logoUrl (which is still required to opt the stamp in).
   logoBytes?: ArrayBuffer | null;
@@ -112,36 +121,48 @@ export interface Placement {
   fits: boolean;
 }
 
-/** The stamp's two faces on one document (embedStampFaces). */
+/** The stamp's face bytes. `jp` (Noto Sans JP) is optional: given => embedded
+ *  and the JP ranges routed to it; absent => the two-face stamp, unchanged. */
+export type StampFonts = { inter: ArrayBuffer; deja: ArrayBuffer; jp?: ArrayBuffer };
+
+/** The stamp's faces on one document (embedStampFaces). */
 export interface StampFaces {
   /** Width of `t` at size `s`, summed across its runs, so shrink/wrap decisions
    *  account for the fallback face too. */
   measure: (t: string, s: number) => number;
   /** Draws a (possibly mixed-face) line with its left edge at (x, y). */
   draw: (page: PDFPage, t: string, x: number, y: number, s: number, color: Color) => void;
-  /** Whether either face has a glyph for the code point; one neither has prints
-   *  as an empty box. */
+  /** Like `draw`, for a line already in VISUAL order (rtlStamp.ts visualLines):
+   *  every glyph lands left to right exactly as given. */
+  drawVisual: (page: PDFPage, t: string, x: number, y: number, s: number, color: Color) => void;
+  /** Whether any embedded face has a glyph for the code point; one none has
+   *  prints as an empty box. */
   hasGlyph: (cp: number) => boolean;
 }
 
 /**
- * Embeds TWO faces in `pdfDoc` (which must have `fontkit` registered) and draws
- * each glyph with the first that covers it: Inter (the brand primary — Latin +
- * Polish diacritics + Cyrillic + Greek) with DejaVuSans as the broad-Unicode
- * fallback (Hebrew, Arabic, …). Inter is also the on-screen stamp face
- * (globals.css `InterStamp`, textFit.ts STAMP_FONT_FAMILY), so the preview
- * matches the print. pdf-lib subsets each on embed, so the ttf size barely
- * affects the output PDF. Shared by stampPdf and the MCP's check copy
- * (agentValues.ts), so anything drawn on a stamped page can show what a stamped
- * value can.
+ * Embeds up to THREE faces in `pdfDoc` (which must have `fontkit` registered)
+ * and draws each glyph with the one that covers it: Inter (the brand primary —
+ * Latin + Polish diacritics + Cyrillic + Greek) with DejaVuSans as the
+ * broad-Unicode fallback (Hebrew, Arabic, …), and, when `fonts.jp` is given,
+ * Noto Sans JP for every code point in JP_FACE_RANGES (fontRuns.ts; Inter and
+ * DejaVu cover none of them, so the routing is a pure range check). Inter is
+ * also the on-screen stamp face (globals.css `InterStamp`, textFit.ts
+ * STAMP_FONT_FAMILY), so the preview matches the print. pdf-lib subsets each on
+ * embed, so the ttf size barely affects the output PDF. Without `fonts.jp` the
+ * JP face is neither embedded nor consulted: the output is byte-identical to the
+ * two-face stamp. Shared by stampPdf and the MCP's check copy (agentValues.ts),
+ * so anything drawn on a stamped page can show what a stamped value can.
  */
 export async function embedStampFaces(
   pdfDoc: PDFDocument,
   fontkit: Parameters<PDFDocument["registerFontkit"]>[0],
-  fonts: { inter: ArrayBuffer; deja: ArrayBuffer },
+  fonts: StampFonts,
 ): Promise<StampFaces> {
   const interFont = await pdfDoc.embedFont(fonts.inter, { subset: true });
   const dejaFont = await pdfDoc.embedFont(fonts.deja, { subset: true });
+  // Embedded only when given: pdf-lib writes every embedded font on save.
+  const jpFont = fonts.jp ? await pdfDoc.embedFont(fonts.jp, { subset: true }) : undefined;
 
   // Per-codepoint coverage of the primary face (fontkit reads the cmap). Glyphs
   // Inter lacks fall through to DejaVu.
@@ -154,10 +175,15 @@ export async function embedStampFaces(
     }
   };
 
-  // Split a string into maximal runs sharing one face (Inter where covered, else
-  // DejaVu), so a mixed-script value renders every glyph instead of tofu.
+  // Split a string into maximal runs sharing one face (the JP face for its
+  // ranges, else Inter where covered, else DejaVu), so a mixed-script value
+  // renders every glyph instead of tofu. A variation selector or voicing mark
+  // after a JP-routed character joins its run (joinsJpRun), JP stamps only.
+  const pick = jpFont
+    ? (cp: number) => (inJpFaceRange(cp) ? jpFont : covers(cp) ? interFont : dejaFont)
+    : (cp: number) => (covers(cp) ? interFont : dejaFont);
   const splitRuns = (t: string): { font: PDFFont; text: string }[] =>
-    splitByCoverage(t, (cp) => (covers(cp) ? interFont : dejaFont)).map((r) => ({
+    (jpFont ? splitByCoverage(t, pick, joinsJpRun) : splitByCoverage(t, pick)).map((r) => ({
       font: r.key,
       text: r.text,
     }));
@@ -177,15 +203,112 @@ export async function embedStampFaces(
     }
   };
 
-  // The fallback's code points, read only once Inter lacks one.
+  // A visual-order line: fontkit would reverse every piece whose script is
+  // right-to-left (it expects logical order), so such a piece is handed over
+  // reversed and comes out as given (fontRuns.ts splitByDirection). Its width is
+  // the same either way: pdf-lib sums advance widths.
+  const drawVisual = (page: PDFPage, t: string, x: number, y: number, s: number, color: Color) => {
+    let cx = x;
+    for (const r of splitRuns(t)) {
+      for (const piece of splitByDirection(r.text, (cp) => fontkitDirection(interKit, cp))) {
+        const text = piece.rtl ? Array.from(piece.text).reverse().join("") : piece.text;
+        page.drawText(text, { x: cx, y, size: s, font: r.font, color });
+        cx += r.font.widthOfTextAtSize(text, s);
+      }
+    }
+  };
+
+  // The fallback's (and the JP face's) code points, read only once Inter lacks one.
   let dejaSet: Set<number> | undefined;
+  let jpSet: Set<number> | undefined;
   const hasGlyph = (cp: number): boolean => {
     if (covers(cp)) return true;
     dejaSet ??= new Set(dejaFont.getCharacterSet());
-    return dejaSet.has(cp);
+    if (dejaSet.has(cp)) return true;
+    if (!jpFont) return false;
+    jpSet ??= new Set(jpFont.getCharacterSet());
+    return jpSet.has(cp);
   };
 
-  return { measure, draw, hasGlyph };
+  return { measure, draw, drawVisual, hasGlyph };
+}
+
+// fontkit's own answer, per code point, to "which way does a run holding this
+// lay out": it picks a run's script from the first code point that isn't
+// Common/Inherited and reverses right-to-left scripts. Asking its layout (a
+// trailing Latin "a" or Hebrew alef tells "neutral" from a script of its own)
+// instead of keeping a script table means the two can never disagree. The
+// script is the font's business only through its cmap, so any face answers;
+// memoized for the module.
+const directionMemo = new Map<number, RunDirection>();
+function fontkitDirection(
+  kit: { layout: (t: string) => { direction: string | null } },
+  cp: number,
+): RunDirection {
+  let d = directionMemo.get(cp);
+  if (d === undefined) {
+    const ch = String.fromCodePoint(cp);
+    d =
+      kit.layout(`${ch}a`).direction === "rtl"
+        ? "rtl"
+        : kit.layout(`${ch}\u05d0`).direction === "rtl"
+          ? "neutral"
+          : "ltr";
+    directionMemo.set(cp, d);
+  }
+  return d;
+}
+
+// One fetch per module (the page, or a mass-fill worker): the 5.8 MB face is
+// loaded on the first Japanese stamp and reused. Reset on failure so a retry
+// fetches again (a mass-fill batch instead stops at its first failure, see
+// batchJpStampFace).
+let jpFacePromise: Promise<ArrayBuffer> | undefined;
+
+/** Fetches the Japanese stamp face (fontRuns.ts JP_FACE_URL), memoized. Rejects
+ *  with "Could not load the Japanese font." on a network, HTTP or body failure. */
+export function loadJpStampFace(): Promise<ArrayBuffer> {
+  jpFacePromise ??= fetch("/fonts/NotoSansJP-Regular.ttf")
+    .then((r) => {
+      if (!r.ok) throw new Error("HTTP " + String(r.status));
+      return r.arrayBuffer();
+    })
+    .catch(() => {
+      jpFacePromise = undefined;
+      throw new Error("Could not load the Japanese font.");
+    });
+  return jpFacePromise;
+}
+
+/** A mass-fill batch's JP face: `face(marksByPage)` resolves the bytes when the
+ *  marks need them (else undefined), fetching at most once per batch. After a
+ *  failed fetch `failed` is true and every later call rejects with the same
+ *  error, so the batch stops with one clear message instead of refetching, and
+ *  failing, row by row. Interactive stamps keep loadJpStampFace's retry. */
+export function batchJpStampFace(): {
+  face: (marksByPage: ReadonlyMap<number, readonly Mark[]>) => Promise<ArrayBuffer | undefined>;
+  readonly failed: boolean;
+} {
+  let pending: Promise<ArrayBuffer> | undefined;
+  let failed = false;
+  return {
+    face: (marksByPage) => {
+      if (!marksNeedJpFace(marksByPage)) return Promise.resolve(undefined);
+      pending ??= loadJpStampFace().catch((err: unknown) => {
+        failed = true;
+        throw err;
+      });
+      return pending;
+    },
+    get failed() {
+      return failed;
+    },
+  };
+}
+
+/** Test-only: forgets the memoized JP face so the next stamp fetches again. */
+export function resetJpStampFaceForTests(): void {
+  jpFacePromise = undefined;
 }
 
 /**
@@ -241,7 +364,17 @@ export async function stampPdf({
           return r.arrayBuffer();
         }),
       ]);
-  const faces = await embedStampFaces(pdfDoc, fontkit, { inter: interBytes, deja: dejaBytes });
+  // The JP face only when a mark draws one of its characters: a passed-in but
+  // unneeded `fonts.jp` is not embedded, so Latin output stays byte-identical.
+  const jp = marksNeedJpFace(marksByPage) ? (fonts?.jp ?? (await loadJpStampFace())) : undefined;
+  const faces = await embedStampFaces(pdfDoc, fontkit, {
+    inter: interBytes,
+    deja: dejaBytes,
+    jp,
+  });
+  // Arabic shaping + the bidi algorithm, loaded only when a mark holds a
+  // right-to-left character; every other mark draws exactly as before.
+  const rtlLayer = marksNeedBidi(marksByPage) ? await import("./rtlStamp") : undefined;
   const pdfPages = pdfDoc.getPages();
 
   const INK = rgb(0.1, 0.1, 0.1);
@@ -357,6 +490,30 @@ export async function stampPdf({
 
     if (text === "") return;
 
+    // A value with a right-to-left character: shaped (Arabic joining forms) in
+    // logical order, measured and wrapped as that, its bidi levels resolved
+    // over the whole value and each line reordered to visual order just before
+    // it is drawn (visualLines). An RTL-dominant value (first strong character
+    // RTL, as dir="auto") reads right to left and starts at the box's right
+    // edge. Every other value keeps the historical path untouched.
+    const bidi = rtlLayer && needsBidi(text) ? rtlLayer : undefined;
+    const rtl = bidi !== undefined && isRtlDominant(text);
+    const body = bidi ? bidi.shapeArabic(text) : text;
+    // What is drawn is measured: the bidi path drops the direction controls
+    // (visualLines), so they take no width in the fit, wrap or anchor either.
+    const measureText = bidi ? (t: string, s: number) => measure(stripBidiControls(t), s) : measure;
+    // `lines` (logical, wrapped from `body`) as they are drawn.
+    const toDraw = (lines: string[]): string[] =>
+      bidi ? bidi.visualLines(body, lines, rtl) : lines;
+    const drawLine = bidi
+      ? (t: string, x: number, y: number, s: number) => {
+          faces.drawVisual(page, t, x, y, s, INK);
+        }
+      : (t: string, x: number, y: number, s: number) => {
+          drawMixed(page, t, x, y, s);
+        };
+    const anchorOf = (a: TextAnchor | undefined) => bidiAnchor(a ?? DEFAULT_TEXT_ANCHOR, rtl);
+
     if (center) {
       // Preset mark (✓ ✗ ■) -> font-independent vector; a comb single-character or
       // a custom glyph -> centered text in the stamp face(s).
@@ -376,8 +533,8 @@ export async function stampPdf({
             ? Math.min(h, w) * CHECKBOX_AUTO_FILL
             : Math.min(Math.min(h, w) * 0.8, 16);
       size = Math.max(6, size);
-      const tw = measure(text, size);
-      drawMixed(page, text, x0 + (w - tw) / 2, y0 + (h - size * 0.7) / 2, size);
+      const tw = measureText(body, size);
+      drawLine(toDraw([body])[0], x0 + (w - tw) / 2, y0 + (h - size * 0.7) / 2, size);
       return;
     }
 
@@ -394,8 +551,15 @@ export async function stampPdf({
       // only). Otherwise vertically auto-shrink from `start` to fit, floor 5pt.
       const { size, lines } =
         m.autoFit === false
-          ? { size: start, lines: wrapLines(text, w - 2 * padX, start, measure) }
-          : fitWrapped(text, w - 2 * padX, h - 2 * padY, start, measure, MULTILINE_MIN_FONT_SIZE);
+          ? { size: start, lines: wrapLines(body, w - 2 * padX, start, measureText) }
+          : fitWrapped(
+              body,
+              w - 2 * padX,
+              h - 2 * padY,
+              start,
+              measureText,
+              MULTILINE_MIN_FONT_SIZE,
+            );
       const placed = layoutMultiline({
         x0,
         y0,
@@ -403,15 +567,15 @@ export async function stampPdf({
         h,
         size,
         lines,
-        anchor: m.anchor ?? DEFAULT_TEXT_ANCHOR,
+        anchor: anchorOf(m.anchor),
         padX,
         padY,
-        measure,
+        measure: measureText,
       });
-      for (const p of placed) {
-        if (p.text === "") continue;
-        drawMixed(page, p.text, p.x, p.y, size);
-      }
+      const drawn = toDraw(lines);
+      placed.forEach((p, i) => {
+        if (p.text !== "") drawLine(drawn[i], p.x, p.y, size);
+      });
       onPlacement?.({
         key: m.key,
         page: pageNum,
@@ -420,7 +584,7 @@ export async function stampPdf({
         startSize: start,
         fits:
           lines.length * size * LINE_HEIGHT_FACTOR <= h - 2 * padY + 0.01 &&
-          lines.every((l) => measure(l, size) <= w - 2 * padX + 0.01),
+          lines.every((l) => measureText(l, size) <= w - 2 * padX + 0.01),
       });
       return;
     }
@@ -430,8 +594,8 @@ export async function stampPdf({
     // Auto the start is derived from the box HEIGHT (autoTextStartPt) so short boxes
     // get proportionate text; a pinned size starts at exactly that size.
     const startPt = m.autoFit ? autoTextStartPt(h) : (m.fontSize ?? DEFAULT_FONT_SIZE);
-    const size = fitFontSize(text, w - 2 * pad, startPt, measure);
-    const tw = measure(text, size);
+    const size = fitFontSize(body, w - 2 * pad, startPt, measureText);
+    const tw = measureText(body, size);
     const { x, y } = anchorPdfXY({
       x0,
       y0,
@@ -439,10 +603,10 @@ export async function stampPdf({
       h,
       tw,
       size,
-      anchor: m.anchor ?? DEFAULT_TEXT_ANCHOR,
+      anchor: anchorOf(m.anchor),
       pad,
     });
-    drawMixed(page, text, x, y, size);
+    drawLine(toDraw([body])[0], x, y, size);
     onPlacement?.({
       key: m.key,
       page: pageNum,

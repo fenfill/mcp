@@ -900,10 +900,43 @@ export function tableIssues(d: Doc, g: Group): Issue[] {
     if (ids.some((id) => d.field.get(id)?.type !== "checkbox"))
       at("a checkbox_matrix cell isn't a checkbox");
   } else {
-    for (let i = 0; i < lineCount(v, v.axis); i++) {
-      const keys = new Set(lineFields(d, v, v.axis, i).map(typeKey));
-      if (keys.size > 1) at(`${axisWord(v.axis)} ${String(i)} mixes types`);
-    }
+    for (const i of mixedLines(d, g)) at(`${axisWord(v.axis)} ${String(i)} mixes types`);
   }
   return out;
+}
+
+/** The driving lines (columns, or rows of a row-typed table) whose cells store more than one type. */
+export function mixedLines(d: Doc, g: Group): number[] {
+  return mixedLineCells(d, g).map((l) => l.index);
+}
+
+/** Each mixed driving line with its cells' ids and the types they store. */
+export function mixedLineCells(
+  d: Doc,
+  g: Group,
+): { index: number; ids: string[]; keys: string[] }[] {
+  const grid = g.grid;
+  if (!Array.isArray(grid) || grid.some((r) => !Array.isArray(r))) return [];
+  const rows = grid.length;
+  const v: TableView = {
+    g,
+    grid: grid as Grid,
+    rows,
+    cols: rows ? (grid[0] as unknown[]).length : 0,
+    axis: g.orientation === "row" ? "row" : "col",
+    format: formatOf(g),
+  };
+  if (v.format === "checkbox_matrix") return [];
+  const out: { index: number; ids: string[]; keys: string[] }[] = [];
+  for (let i = 0; i < lineCount(v, v.axis); i++) {
+    const cells = lineFields(d, v, v.axis, i);
+    const keys = new Set(cells.map(typeKey));
+    if (keys.size > 1) out.push({ index: i, ids: cells.map((f) => f.id), keys: [...keys] });
+  }
+  return out;
+}
+
+/** "column" or "row": what a table's driving lines are called. */
+export function lineWord(g: Group): string {
+  return axisWord(g.orientation === "row" ? "row" : "col");
 }

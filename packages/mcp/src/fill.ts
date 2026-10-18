@@ -14,8 +14,10 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import {
   type AgentSkip,
   fillAgentPdf,
+  type FillAgentPdfArgs,
   type FillAgentPdfResult,
   MCP_OUTPUT_TAG,
+  UnsupportedScriptError,
 } from "@/app/t/[template_id]/fillCore";
 
 import { type Cache, sha256Hex } from "./cache.js";
@@ -23,6 +25,7 @@ import { expandHome } from "./config.js";
 import { ToolError } from "./errors.js";
 import type { Fonts } from "./fonts.js";
 import { toArrayBuffer } from "./fonts.js";
+import { DEFAULT_JP_FONT_URL, JpFontError, jpFontReason } from "./jpFont.js";
 import { printedBoxes } from "./render.js";
 import type { RenderSchema } from "./types.js";
 import { VERSION } from "./version.js";
@@ -236,6 +239,59 @@ export function loadImage(p: string): Uint8Array {
   return new Uint8Array(readFileSync(abs));
 }
 
+/** The Japanese face on demand (jpFont.ts ensureJpFace, bound to the cache dir). */
+export interface JpFaceSource {
+  load: () => Promise<ArrayBuffer>;
+  /** Where the face is kept, for the hint (pre-seeding it works offline). */
+  path: string;
+}
+
+/** Values that need the Japanese face, which could not be loaded. Never stamps
+ *  tofu: the whole fill is refused. `reason` is why the face is missing. */
+export function unsupportedScriptError(
+  e: UnsupportedScriptError,
+  why?: { reason: string; text: string; path: string },
+): ToolError {
+  const where =
+    "The check covers the whole document, so preview_page refuses even when these values are on another page.";
+  return new ToolError(
+    "unsupported_script",
+    `Japanese characters need the Noto Sans JP font, which couldn't be loaded (fields: ${e.ids.join(", ")}).`,
+    {
+      hint: why
+        ? `Couldn't download the Japanese font (${why.text}); connect to the internet once and retry, or pre-seed ${why.path} (from ${DEFAULT_JP_FONT_URL}). ${where}`
+        : `The Japanese font isn't available to this call. ${where} Drop or replace those values, or fill this form at fenfill.com.`,
+      details: { ids: e.ids, ...(why ? { reason: why.reason } : {}) },
+    },
+  );
+}
+
+/** fillAgentPdf, loading the Japanese face only when the core asks for it (it
+ *  throws UnsupportedScriptError before stamping when a mark needs the face),
+ *  so a Latin-only fill touches neither the network nor the disk for it. */
+export async function fillWithJpFace(
+  args: FillAgentPdfArgs,
+  jp: JpFaceSource | undefined,
+): Promise<FillAgentPdfResult> {
+  try {
+    return await fillAgentPdf(args);
+  } catch (e) {
+    if (!(e instanceof UnsupportedScriptError)) throw e;
+    if (!jp) throw unsupportedScriptError(e);
+    let face: ArrayBuffer;
+    try {
+      face = await jp.load();
+    } catch (fe) {
+      throw unsupportedScriptError(e, {
+        reason: fe instanceof JpFontError ? fe.reason : "error",
+        text: jpFontReason(fe),
+        path: jp.path,
+      });
+    }
+    return await fillAgentPdf({ ...args, fonts: { ...args.fonts, jp: face } });
+  }
+}
+
 /** A PDF that needs a user password to open (decryptPdf's refusal). */
 export function isPasswordError(e: unknown): boolean {
   return e instanceof Error && /password/i.test(e.message);
@@ -278,6 +334,8 @@ export interface StampArgs {
   cache: Cache;
   /** Also write the check copy here (checkPathFor, already validated). */
   checkAbs?: string | null;
+  /** Loaded only when a value needs the Japanese face; absent = refuse those. */
+  jpFace?: JpFaceSource;
 }
 
 export interface StampResult {
@@ -306,21 +364,25 @@ export async function stampAndWrite(a: StampArgs): Promise<StampResult> {
         .filter((p): p is number => typeof p === "number")
     : [];
   const printed = a.checkAbs ? await printedBoxes(a.pdfBytes, pages) : undefined;
-  let res: Awaited<ReturnType<typeof fillAgentPdf>>;
+  let res: FillAgentPdfResult;
   try {
-    res = await fillAgentPdf({
-      pdfBytes: toArrayBuffer(a.pdfBytes),
-      render: a.render,
-      input: a.agentInput,
-      fonts: a.fonts,
-      branding: a.branding,
-      logoBytes: a.logoBytes,
-      loadImage,
-      infoTags: OUTPUT_TAGS,
-      check: !!a.checkAbs,
-      checkPrinted: printed,
-    });
+    res = await fillWithJpFace(
+      {
+        pdfBytes: toArrayBuffer(a.pdfBytes),
+        render: a.render,
+        input: a.agentInput,
+        fonts: a.fonts,
+        branding: a.branding,
+        logoBytes: a.logoBytes,
+        loadImage,
+        infoTags: OUTPUT_TAGS,
+        check: !!a.checkAbs,
+        checkPrinted: printed,
+      },
+      a.jpFace,
+    );
   } catch (e) {
+    if (e instanceof UnsupportedScriptError) throw unsupportedScriptError(e);
     if (isPasswordError(e)) throw passwordError();
     if (isFillForbiddenError(e)) throw fillForbiddenError();
     throw e;

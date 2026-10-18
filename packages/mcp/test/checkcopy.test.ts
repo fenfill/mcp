@@ -402,6 +402,36 @@ describe("check copy table headers", () => {
     expect(await page1Has(out.checkPdf!, "C: Beta")).toBe(true);
   });
 
+  it("reads a Hebrew header right to left, prefix at its right end, cut on the left", async () => {
+    // The header's own text sets the direction (not the Latin "C: " prefix), the
+    // prefix stays "C:" at the start (the right), and a cut header ends in "…"
+    // where its last kept word ends: at the left.
+    const { render } = fixture("classic_tables");
+    const long = Array.from({ length: 12 }, () => "שלום עולם").join(" ");
+    const headerLine = async (text: string): Promise<string> => {
+      const r = applyOps(render, [{ op: "set_headers", id: TABLE, axis: "col", texts: [text] }]);
+      expect(r.rejected).toEqual([]);
+      const out = await checked(r.render, await pdfFor(r.render));
+      expect(out.warnings).toEqual([]);
+      const pt = await pageText(out.checkPdf!, 1);
+      const shin = pt.glyphs.findIndex((g) => g.char === "ש");
+      expect(shin).toBeGreaterThanOrEqual(0);
+      const bottom = pt.own[shin].bottom;
+      return pt.glyphs
+        .map((g, i) => ({ char: g.char, ...pt.own[i] }))
+        .filter((g) => Math.abs(g.bottom - bottom) < 1)
+        .sort((a, b) => a.left - b.left)
+        .map((g) => g.char)
+        .join("");
+    };
+    // The line's other headers ("C: Born", …) sit to the right of column 0's.
+    const rev = (t: string) => Array.from(t).reverse().join("");
+    expect(await headerLine("שלום עולם")).toMatch(new RegExp(`^${rev("עולם")}${rev("שלום")}C:C:B`));
+    const cut = await headerLine(long);
+    // PDFium reads the ellipsis glyph back as "...".
+    expect(cut).toMatch(new RegExp(`^(…|\\.\\.\\.)[^C:.]+${rev("שלום")}C:C:B`));
+  });
+
   it("draws headers outside WinAnsi, and every page still previews", async () => {
     // A second page with no table: one header used to fail the whole document.
     const { render: tables } = fixture("classic_tables");
@@ -603,6 +633,129 @@ describe("a check copy that cannot be built", () => {
       // The field prints in capitals.
       const written = new Uint8Array(readFileSync(out));
       expect((await extractStampedText(written, 0)).toLowerCase()).toContain("ada lovelace");
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("Japanese values without the JP face (none injected: refused, never tofu)", () => {
+  const HINT =
+    "The Japanese font isn't available to this call. The check covers the whole document, so preview_page refuses even when these values are on another page. Drop or replace those values, or fill this form at fenfill.com.";
+  const refused = (ids: string[]) => ({
+    code: "unsupported_script",
+    message: `Japanese characters need the Noto Sans JP font, which couldn't be loaded (fields: ${ids.join(", ")}).`,
+    hint: HINT,
+    details: { ids },
+  });
+
+  it("fill refuses before writing anything", async () => {
+    const { render } = fixture("canonical");
+    const t = tmp();
+    try {
+      const out = join(t.dir, "filled.pdf");
+      const err: unknown = await stampAndWrite({
+        pdfBytes: await pdfFor(render),
+        render,
+        agentInput: { "f-text": "山田 太郎", "f-t1": "Ada" },
+        fonts: loadFonts(),
+        branding: null,
+        logoBytes: null,
+        outputAbs: out,
+        overwrite: false,
+        cache: new Cache(join(t.dir, "cache")),
+        checkAbs: join(t.dir, "filled.check.pdf"),
+      }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ToolError);
+      expect(err).toMatchObject(refused(["f-text"]));
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("fill refuses a symbol only the JP face draws (⑪), not just kana and kanji", async () => {
+    const { render } = fixture("canonical");
+    const t = tmp();
+    try {
+      const out = join(t.dir, "filled.pdf");
+      const err: unknown = await stampAndWrite({
+        pdfBytes: await pdfFor(render),
+        render,
+        agentInput: { "f-text": "Clause ⑪ (a)", "f-t1": "Ada ①" },
+        fonts: loadFonts(),
+        branding: null,
+        logoBytes: null,
+        outputAbs: out,
+        overwrite: false,
+        cache: new Cache(join(t.dir, "cache")),
+        checkAbs: join(t.dir, "filled.check.pdf"),
+      }).catch((e: unknown) => e);
+      expect(err).toMatchObject(refused(["f-text"]));
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("preview_page refuses a value on the page shown", async () => {
+    const { render } = fixture("canonical");
+    await expect(
+      previewPage({
+        pdfBytes: await pdfFor(render),
+        render,
+        page: 1,
+        values: { "f-text": "東京" },
+        fonts: loadFonts(),
+      }),
+    ).rejects.toMatchObject(refused(["f-text"]));
+  });
+
+  it("preview_page refuses a value on another page too", async () => {
+    const { render, agent } = fixture("ungrouped_fields");
+    const city = agent.fields.find((e) => e.label === "City")!.id;
+    await expect(
+      previewPage({
+        pdfBytes: await pdfFor(render),
+        render,
+        page: 1,
+        values: { [city]: "東京" },
+        fonts: loadFonts(),
+        overlay: "none",
+      }),
+    ).rejects.toMatchObject(refused([city]));
+  });
+});
+
+describe("Hebrew and Arabic values (the shared stamp's RTL layer)", () => {
+  it("fill prints them right to left instead of refusing", async () => {
+    const { render } = fixture("canonical");
+    const t = tmp();
+    try {
+      const out = join(t.dir, "filled.pdf");
+      await stampAndWrite({
+        pdfBytes: await pdfFor(render),
+        render,
+        agentInput: { "f-text": "שלום 123 لا" },
+        fonts: loadFonts(),
+        branding: null,
+        logoBytes: null,
+        outputAbs: out,
+        overwrite: false,
+        cache: new Cache(join(t.dir, "cache")),
+        checkAbs: join(t.dir, "filled.check.pdf"),
+      });
+      // The value's glyphs by where they print, left to right: the lam-alef
+      // ligature (one glyph, which PDFium reads back as لا at one spot), the
+      // digits in their own order, then שלום read from the right.
+      const text = await pageText(readFileSync(out), 1);
+      const leftToRight = text.glyphs
+        .map((g, i) => ({ char: g.char, left: text.own[i].left }))
+        .filter((g) => "שלום123لا".includes(g.char))
+        .sort((a, b) => a.left - b.left)
+        .map((g) => g.char)
+        .join("");
+      expect(leftToRight).toBe("لا123םולש");
     } finally {
       t.cleanup();
     }

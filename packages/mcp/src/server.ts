@@ -54,9 +54,11 @@ import {
   LOGO_SENTINEL,
   readInputPdf,
   resolveOutputPath,
+  type JpFaceSource,
   stampAndWrite,
 } from "./fill.js";
 import { loadFonts, toArrayBuffer } from "./fonts.js";
+import { ensureJpFace, jpFontPath } from "./jpFont.js";
 import { log } from "./log.js";
 import { EchoGuard } from "./echo.js";
 import {
@@ -93,6 +95,10 @@ export interface ServerOptions {
   env?: Env;
   fetchImpl?: typeof fetch;
   fontsDir?: string;
+  /** Downloads the Japanese face (default: global fetch). Never the API client's. */
+  fontFetchImpl?: typeof fetch;
+  /** Where the Japanese face is downloaded from (default fenfill.com/fonts/…). */
+  jpFontUrl?: string;
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -251,6 +257,12 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
       await sleepTimer(ms, undefined, { signal });
     });
   const cache = new Cache(cacheDirFromEnv(env), now);
+  // Loaded on the first value that needs it (fillWithJpFace), then cached on disk.
+  const jpFace: JpFaceSource = {
+    load: () =>
+      ensureJpFace({ cacheDir: cache.root, fetchImpl: opts.fontFetchImpl, url: opts.jpFontUrl }),
+    path: jpFontPath(cache.root),
+  };
   const stop = new AbortController();
   const owner = randomBytes(8).toString("hex");
   LIVE_OWNERS.add(owner);
@@ -529,7 +541,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "fill_form",
     {
       title: "Fill an analyzed PDF locally",
-      description: `Fill a PDF you analyzed with analyze_form and write a new, flattened PDF. Runs entirely on this machine: no network, and the values never leave it. ${VALUE_SHAPES} Returns filled/skipped counts and warnings, including text shrunk hard or running past its box and filled boxes that overlap; pass check_pdf to see the result.`,
+      description: `Fill a PDF you analyzed with analyze_form and write a new, flattened PDF. Runs entirely on this machine and the values never leave it; the only network use is a one-time download of the public Japanese font from fenfill.com, the first time a value needs it (it carries no form data). ${VALUE_SHAPES} Returns filled/skipped counts and warnings, including text shrunk hard or running past its box and filled boxes that overlap; pass check_pdf to see the result.`,
       inputSchema: {
         path: z
           .string()
@@ -570,6 +582,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         render,
         agentInput: answers,
         fonts: loadFonts(opts.fontsDir),
+        jpFace,
         branding: null,
         logoBytes: null,
         outputAbs,
@@ -650,6 +663,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           render,
           agentInput: answers,
           fonts: loadFonts(opts.fontsDir),
+          jpFace,
           branding,
           logoBytes: logo ? toArrayBuffer(logo) : null,
           outputAbs,
@@ -820,7 +834,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "preview_page",
     {
       title: "Preview a page with its field boxes",
-      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin, as edit_template uses), format and font_pt; options, table cells (row, col), table_rows columns and (in a crop) comb cells with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: text much larger than its neighbours', a box over printed text (not on scans; a pale hint at its left edge is a placement_note), a box past its ruled cell, an option box on the wrong side of its caption. Use it as a read-only placement audit. values (see that parameter) stamp test values. overlay: "outline" drops the tags, "none" shows only the stamped page (e.g. after check_copy_failed). crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now inside a table or group). It renders the local working copy (edit_template) when one exists, else the saved or analyzed version (edited: true/false). Rendered on this machine: nothing is written to disk and the values are never sent anywhere.`,
+      description: `Render one page as a PNG with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix, plus a legend: tag → id, type, label, box (page fractions, top-left origin), format and font_pt; options, table cells (row, col), table_rows columns and (in a crop) comb cells with their own boxes. placement_warnings ([] = checked, clean) covers every box shown: text much larger than its neighbours', a box over printed text (not on scans; a pale hint at its left edge is a placement_note), a box past its ruled cell, an option box on the wrong side of its caption. Read-only audit; values stamp test values. overlay: "outline" drops the tags, "none" shows only the stamped page (e.g. after check_copy_failed). crop + zoom magnify a region; legend: "changed" lists only what changed since your last preview of the page (moved_into: fields now in a table or group). Renders the edit_template working copy if any, else the saved or analyzed version (edited: true/false). Local: nothing is written to disk, values are never sent; the sole network use is a one-time download of fenfill.com's public Japanese font when a value first needs it (no form data).`,
       inputSchema: {
         path: TARGET_PATH,
         template_id: TARGET_TEMPLATE,
@@ -902,6 +916,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           values: answers,
           dpi: args.dpi,
           fonts: loadFonts(opts.fontsDir),
+          jpFace,
           crop: args.crop,
           zoom: args.zoom,
           overlay: args.overlay,
@@ -1014,7 +1029,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .max(MAX_OPS)
           .optional()
           .describe(
-            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id, diff_summary.ops the section it landed in: without section_id, that of the nearest field at or above it); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type char|integer|date, or date_format with one D/M/Y letter per cell, e.g. DDMMYYYY, which makes it a date comb; diff_summary.ops shows the comb's cell_type, date_format and max_length); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options; the members keep their ids, and diff_summary.ops lists them in reading order with the group's section; the group stands where its earliest member stood); ungroup {id}; set_options {id, options: ["label", …] in listed order, or [{id, label}]}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Combs in one op: add {type: "comb", page, label, cells: N (box cut into N equal cells) | [{x, y, w, h}, …] (each printed cell's box, for cells split by separators), box?, cell_type?, date_format?, section_id?} (its cells have no label); retype {id, type: "comb", cells, cell_type?, date_format?} turns a text/date field into a comb over its box, keeping label, section, order and required; comb_add_cell {id: comb, box, date_format?} and comb_remove_cell {id: cell, date_format?} (a date comb needs its new date_format, one letter per cell); group {kind: "comb"} takes cell_type and date_format too, and set_format on a comb's cell applies to its comb. Refs: any op that adds something takes ref: "name", and later ops of the same call write "$name" for its id (set_format {id: "$dob", …}). Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where whichever of them is listed first now stands (not ids[0]'s place); every other entry keeps its relative order (stamps order; geometry no longer decides). A partial list moves only what it names: to put B right after A, list both; chained partial reorders are simplest replaced by one with the page's whole list. diff_summary.ops shows the order now listed. A section is listed as one run where its first entry stands, so entries of different sections never stand together: set_section {ids, section_id | null} moves fields or groups of one page to another of its sections (get_template shows each section's section_id; null = no section), and set_section_title {page, section_id, title} renames one. A reorder whose ids cannot come out as asked and that would change nothing in the listing is rejected. Every cell of one column (or row, when orientation is row) has one type.`,
+            `Edit ops, applied in order (max ${String(MAX_OPS)}), each all-or-nothing; a box only has to lie on the page after the whole batch (so move then resize is fine). Fields: set_box {id, x, y, w, h, snap?} (absolute top-left + size; a group scales its members); move {id, dx, dy} or {id, x, y, snap?} (new top-left); resize {id, w, h}; add {page, type: text|multiline|date|checkbox|signature, box: {x, y, w, h}, label, description?, placeholder?, required?, section_id?, snap?} (diff_summary.added gives the new id, diff_summary.ops the section it landed in: without section_id, that of the nearest field at or above it); snap: "underline" fits the box onto the printed rule under it, "cell" into the ruled box around it, "answer" into that cell's blank part below (or after) its printed caption (read from the page on this machine; a miss keeps your box and warns); relabel {id, label}; retype {id, type} (a radio/multiselect group: radio|multiselect); delete {id}; set_format {id, format: {...}} (font_size, text_anchor, variant, date_format: DD/MM/YYYY|MM/DD/YYYY|YYYY-MM-DD|DD.MM.YYYY|DD-MM-YYYY; null removes a key; on a table cell it applies to the cell's whole column/row; a comb group: cell_type char|integer|date, or date_format with one D/M/Y letter per cell, e.g. DDMMYYYY, which makes it a date comb; diff_summary.ops shows the comb's cell_type, date_format and max_length); set_required {id, required}; set_description {id, description}; set_placeholder {id, placeholder} (null clears); set_autofill {id, autofill: a browser token (name, given-name, family-name, email, tel, street-address, postal-code, bday, …) or null}. Groups: group {ids, kind: "choice"|"comb", label, multiple?} (standalone fields on one page; choice turns them into checkbox options; the members keep their ids, and diff_summary.ops lists them in reading order with the group's section; the group stands where its earliest member stood); ungroup {id}; set_options {id, options: [{id, label}] (recommended) or ["label", …]: plain labels go to the options in the order of the ids of a group op earlier in the same call, else in reading order (as get_template lists them); diff_summary.ops shows each option's label}; add_option {id: group, label, box, index?} and remove_option {id: group, option} keep the group's id. Combs in one op: add {type: "comb", page, label, cells: N (box cut into N equal cells) | [{x, y, w, h}, …] (each printed cell's box, for cells split by separators), box?, cell_type?, date_format?, section_id?} (its cells have no label); retype {id, type: "comb", cells, cell_type?, date_format?} turns a text/date field into a comb over its box, keeping label, section, order and required; comb_add_cell {id: comb, box, date_format?} and comb_remove_cell {id: cell, date_format?} (a date comb needs its new date_format, one letter per cell); group {kind: "comb"} takes cell_type and date_format too, and set_format on a comb's cell applies to its comb. Refs: any op that adds something takes ref: "name", and later ops of the same call write "$name" for its id (set_format {id: "$dob", …}). Tables: group {kind: "table", label, cells: [[id|null, …], …] (rows × columns) or ids (laid out from their boxes), header_cols?, header_rows?, orientation?: "col"|"row" (the axis whose lines carry the types; default col), format?: classic|expandable|checkbox_matrix}; table_insert {id, axis: "row"|"col", index, box?: {y, h} for a row / {x, w} for a column (default: one pitch past the edge, or centred in the gap), header?, type?}; table_delete {id, axis, index, keep_cells?}; table_add_cell {id, row, col, box?} (fills an empty slot); table_adopt {id, field, row, col} (moves a loose field into an empty slot); set_column_type {id, index, type: text|number|currency|date|checkbox, date_format?} (index along the typed axis); set_orientation {id, orientation} (resets every cell to text); set_header {id, axis, index, text}; set_headers {id, axis, texts: [...], start?} (several at once). Order: reorder {page, ids} moves those top-level entries together, in that order, to where whichever of them is listed first now stands (not ids[0]'s place); every other entry keeps its relative order (stamps order; geometry no longer decides). A partial list moves only what it names: to put B right after A, list both; chained partial reorders are simplest replaced by one with the page's whole list. diff_summary.ops shows the order now listed. A section is listed as one run where its first entry stands, so entries of different sections never stand together: set_section {ids, section_id | null} moves fields or groups of one page to another of its sections (get_template shows each section's section_id; null = no section), and set_section_title {page, section_id, title} renames one. A reorder whose ids cannot come out as asked and that would change nothing in the listing is rejected. Every cell of one column (or row, when orientation is row) has one type.`,
           ),
         discard: z
           .boolean()

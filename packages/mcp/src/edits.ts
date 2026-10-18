@@ -59,6 +59,9 @@ import {
 import {
   applyFormatToLine,
   groupTable,
+  lineWord,
+  mixedLineCells,
+  mixedLines,
   setColumnType,
   setHeader,
   setHeaders,
@@ -237,6 +240,8 @@ export interface OpOutcome {
   section?: SectionRef | null;
   /** group: the new group's members (its options or cells, ids unchanged) in reading order. */
   members?: string[];
+  /** set_options: every option of the group with its label now, in reading order. */
+  options?: { id: string; label: string }[];
   noop?: true;
 }
 
@@ -416,6 +421,10 @@ interface OneResult {
   section?: SectionRef | null;
   /** group: the new group's members (options, cells) in reading order */
   members?: string[];
+  /** set_options: the group's options and labels in reading order */
+  options?: { id: string; label: string }[];
+  /** group (choice): the ids in the order the op gave them, for a later set_options of the batch */
+  batchOrder?: { id: string; ids: string[] };
 }
 
 /** Snap a single field's box (percent) to the blank under it, if the op asked. */
@@ -728,7 +737,9 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
         added: gid,
         members: readingMembers(d, g).map((m) => m.id),
         section: sectionOf(d, page, gid),
-        ...(op.kind === "comb" ? { comb: gid } : {}),
+        ...(op.kind === "comb"
+          ? { comb: gid }
+          : { batchOrder: { id: gid, ids: fs.map((f) => f.id) } }),
       };
     }
     case "ungroup": {
@@ -752,16 +763,28 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
       if (op.options.every((o) => typeof o === "string")) {
         if (op.options.length !== opts.length) {
           return bad(
-            `this group has ${String(opts.length)} options; pass that many labels (in the order the options are listed), or [{id, label}] pairs. Add an option with add_option, or remove one with remove_option.`,
+            `this group has ${String(opts.length)} options; pass that many labels (they go in the order of the ids of this call's group op that made it, else in reading order, as get_template lists them), or [{id, label}] pairs. Add an option with add_option, or remove one with remove_option.`,
           );
         }
-        // The order analyze/get_template list them (resolveMembers: reading order).
-        const byId = buildFieldById(d.s.fields as unknown as Parameters<typeof buildFieldById>[0]);
-        const ordered = resolveMembers(g as unknown as Parameters<typeof resolveMembers>[0], byId);
-        ordered.forEach((f, i) => {
-          const live = d.field.get(f.id);
+        // The order analyze/get_template list them (resolveMembers: reading order),
+        // unless this batch's group op made the group: then the order of its ids,
+        // while they are still exactly its options.
+        const reading = readingMembers(d, g).map((m) => m.id);
+        const given = d.batchGroups?.get(g.id);
+        const current = new Set(opts.map((m) => m.id));
+        const order =
+          given && given.length === current.size && given.every((id) => current.has(id))
+            ? given
+            : reading;
+        order.forEach((id, i) => {
+          const live = d.field.get(id);
           if (live) live.label = (op.options[i] as string).trim();
         });
+        if (order.some((id, i) => id !== reading[i])) {
+          warnings.push(
+            `options_order_differs_from_reading_order: group ${g.id}'s labels follow the ids order of its group op (${order.join(", ")}), not reading order (${reading.join(", ")}); check them, or pass [{id, label}]`,
+          );
+        }
       } else {
         for (const o of op.options) {
           if (!isRec(o) || typeof o.id !== "string" || typeof o.label !== "string") {
@@ -773,7 +796,13 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
           f.label = o.label.trim();
         }
       }
-      return { touched: [g.id] };
+      return {
+        touched: [g.id],
+        options: readingMembers(d, g).map((m) => ({
+          id: m.id,
+          label: typeof m.label === "string" ? m.label : "",
+        })),
+      };
     }
     case "add_option": {
       const g = needGroup(d, op.id);
@@ -1457,6 +1486,8 @@ function applyPass(
   const confirmed: Refusal[] = [];
   // The batch's refs: what an op with `ref` added, for "$ref" in later ops.
   const refs = new Map<string, string>();
+  // The batch's choice groups: the ids order their group op gave (set_options follows it).
+  const batchGroups = new Map<string, string[]>();
   let applied = 0;
   ops.forEach((raw, i) => {
     const skip = excluded.get(i);
@@ -1467,6 +1498,7 @@ function applyPass(
     const draft = structuredClone(cur);
     const d = index(draft);
     d.refs = refs;
+    d.batchGroups = batchGroups;
     const w: string[] = [];
     try {
       const given = isRec(raw) ? raw.ref : undefined;
@@ -1480,13 +1512,53 @@ function applyPass(
         bad(
           "ref names what an op adds (add, group, add_option, comb_add_cell…); this op adds nothing",
         );
-      const issues = touchedIssues(d, r.touched, r.tables);
+      let issues = touchedIssues(d, r.touched, r.tables);
+      if (issues.length) {
+        // An op answers only for the problems it brings: one the touched items
+        // already had (a stored table whose columns mix types) does not block it.
+        const before = index(cur);
+        const had = new Set(
+          touchedIssues(
+            before,
+            r.touched.filter((id) => before.field.has(id) || before.group.has(id)),
+            (r.tables ?? []).filter((id) => before.group.has(id)),
+          ).map((x) => `${x.path} ${x.reason}`),
+        );
+        // A mixed line is matched by its cells, not its index, which a column
+        // insert or delete shifts: it was there if a line that already mixed
+        // shares a cell with it and held every type it holds now.
+        const stillMixed = (x: Issue): boolean => {
+          const m = / (\d+) mixes types$/.exec(x.reason);
+          const g = d.group.get(x.id ?? "");
+          const was = before.group.get(x.id ?? "");
+          if (!m || !g || !was) return false;
+          const now = mixedLineCells(d, g).find((l) => l.index === Number(m[1]));
+          return (
+            !!now &&
+            mixedLineCells(before, was).some(
+              (l) =>
+                now.ids.some((id) => l.ids.includes(id)) &&
+                now.keys.every((k) => l.keys.includes(k)),
+            )
+          );
+        };
+        issues = issues.filter((x) => !had.has(`${x.path} ${x.reason}`) && !stillMixed(x));
+      }
       if (issues.length) {
         bad(
           issues
             .slice(0, 5)
             .map((x) => `${x.path} ${x.reason}`)
             .join("; "),
+        );
+      }
+      for (const id of r.tables ?? []) {
+        const g = d.group.get(id);
+        const mixed = g ? mixedLines(d, g) : [];
+        if (!g || !mixed.length) continue;
+        const word = lineWord(g);
+        w.push(
+          `table ${id}: ${mixed.map((n) => `${word} ${String(n)}`).join(", ")} still store${mixed.length === 1 ? "s" : ""} mixed types; fill, print and get_template use one type per ${word} (its first typed cell's), so set_column_type or set_format a cell of each to settle them`,
         );
       }
       let vouched: Refusal[] = [];
@@ -1534,11 +1606,13 @@ function applyPass(
         ...(r.order ? { order: r.order } : {}),
         ...(r.section !== undefined ? { section: r.section } : {}),
         ...(r.members ? { members: r.members } : {}),
+        ...(r.options ? { options: r.options } : {}),
         ...(noop ? { noop: true as const } : {}),
       });
       cur = draft;
       applied++;
       if (typeof ref === "string" && r.added) refs.set(ref, r.added);
+      if (r.batchOrder) batchGroups.set(r.batchOrder.id, r.batchOrder.ids);
       confirmed.push(...vouched);
       counts[name] = (counts[name] ?? 0) + 1;
       if (r.added) added.push({ op_index: i, id: r.added });

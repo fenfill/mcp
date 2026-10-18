@@ -327,6 +327,10 @@ process.stderr.write(
     .join(", ")}\n`,
 );
 if (!existsSync(join(DIST, "fonts", "Inter-Regular.ttf"))) throw new Error("fonts missing");
+// The Japanese face is fetched on demand (src/jpFont.ts), never shipped.
+if (existsSync(join(DIST, "fonts", "NotoSansJP-Regular.ttf"))) {
+  throw new Error("dist/fonts must not hold the Japanese face (it is fetched on demand)");
+}
 for (const f of ["PDFium-LICENSE.txt", "PDFium-third-party.txt"]) {
   if (!existsSync(join(HERE, "licenses", f))) throw new Error(`licenses/${f} missing`);
 }

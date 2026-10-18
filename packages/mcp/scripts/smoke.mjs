@@ -9,10 +9,11 @@
 // Run via `npm run smoke` (which builds first).
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -270,6 +271,11 @@ try {
   writeFileSync(encPath, enc);
   seed(cacheDir, plain);
   seed(cacheDir, enc);
+  mkdirSync(join(cacheDir, "fonts"), { recursive: true, mode: 0o700 });
+  // The public mirror doesn't carry the 5.8 MB face; its smoke skips the Japanese step.
+  const JP_FACE_SRC = join(REPO, "public/fonts/NotoSansJP-Regular.ttf");
+  const HAS_JP_FACE = existsSync(JP_FACE_SRC);
+  if (HAS_JP_FACE) cpSync(JP_FACE_SRC, join(cacheDir, "fonts", "NotoSansJP-Regular.ttf"));
 
   const childEnv = {
     FENFILL_CACHE_DIR: cacheDir,
@@ -316,6 +322,27 @@ try {
     assert.match(text, /Smoke Test Ada/, `${label}: stamped text`);
     assert.ok(await hasTag(bytes), `${label}: FenfillMcpOutput tag`);
     process.stderr.write(`smoke: ${label} fill ok (${bytes.length} bytes)\n`);
+  }
+
+  // Japanese, offline: the face is pre-seeded in the cache (the bundle doesn't ship
+  // it and the API URL is unroutable), so no download is attempted.
+  if (HAS_JP_FACE) {
+    const JP = "東京都新宿区西新宿二丁目8番1号";
+    const jpOut = join(work, "jp-filled.pdf");
+    const jr = await client.callTool({
+      name: "fill_form",
+      arguments: { path: plainPath, values: { name: JP }, output_path: jpOut },
+    });
+    assert.ok(!jr.isError, `jp fill: ${jr.content[0].text}`);
+    assert.equal(JSON.parse(jr.content[0].text).filled, 1);
+    let jpText;
+    try {
+      jpText = execFileSync("pdftotext", [jpOut, "-"], { encoding: "utf8" }).replace(/\s+/g, "");
+    } catch {
+      jpText = (await stampedText(readFileSync(jpOut))).replace(/\s+/g, ""); // no poppler
+    }
+    assert.ok(jpText.includes(JP), `jp: stamped text ${JSON.stringify(jpText)}`);
+    process.stderr.write("smoke: Japanese fill ok (pre-seeded face)\n");
   }
 
   // preview_page: the bundled pdfium.wasm renders the check copy, offline.

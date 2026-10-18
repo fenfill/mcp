@@ -17,16 +17,20 @@ import {
   expBodyRows,
   fillAgentPdf,
   normalizeSchema,
+  UnsupportedScriptError,
 } from "@/app/t/[template_id]/fillCore";
 
 import { ToolError } from "./errors.js";
 import {
   checkCopyFailed,
   fillForbiddenError,
+  fillWithJpFace,
   isFillForbiddenError,
   isPasswordError,
+  type JpFaceSource,
   loadImage,
   passwordError,
+  unsupportedScriptError,
 } from "./fill.js";
 import type { Fonts } from "./fonts.js";
 import { toArrayBuffer } from "./fonts.js";
@@ -54,6 +58,8 @@ export interface PreviewArgs {
   zoom?: number;
   /** What is drawn over the page (default "full"). */
   overlay?: Overlay;
+  /** Loaded only when a value needs the Japanese face; absent = refuse those. */
+  jpFace?: JpFaceSource;
 }
 
 /** "full": every box outlined and tagged, table headers printed. "outline":
@@ -423,23 +429,27 @@ export async function previewPage(a: PreviewArgs): Promise<Preview> {
   const printed = overlay === "full" ? await printedBoxes(a.pdfBytes, [a.page]) : undefined;
   let res: Awaited<ReturnType<typeof fillAgentPdf>>;
   try {
-    res = await fillAgentPdf({
-      pdfBytes: toArrayBuffer(a.pdfBytes),
-      render: a.render,
-      input: a.values,
-      fonts: a.fonts,
-      branding: null,
-      logoBytes: null,
-      loadImage,
-      // "none" shows the stamped PDF itself: no check copy is built, so none can fail.
-      check: overlay !== "none",
-      // preview_page's JSON carries the colour key; the banner would only
-      // cover the top of page 1.
-      checkBanner: false,
-      checkTags: overlay === "full",
-      checkPrinted: printed,
-    });
+    res = await fillWithJpFace(
+      {
+        pdfBytes: toArrayBuffer(a.pdfBytes),
+        render: a.render,
+        input: a.values,
+        fonts: a.fonts,
+        branding: null,
+        logoBytes: null,
+        loadImage,
+        // "none" shows the stamped PDF itself: no check copy is built, so none can fail.
+        check: overlay !== "none",
+        // preview_page's JSON carries the colour key; the banner would only
+        // cover the top of page 1.
+        checkBanner: false,
+        checkTags: overlay === "full",
+        checkPrinted: printed,
+      },
+      a.jpFace,
+    );
   } catch (e) {
+    if (e instanceof UnsupportedScriptError) throw unsupportedScriptError(e);
     if (isPasswordError(e)) throw passwordError();
     if (isFillForbiddenError(e)) throw fillForbiddenError();
     throw e;

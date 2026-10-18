@@ -209,6 +209,64 @@ describe("applyOps", () => {
     expect(group(g.render, gid).order).toBe(field(ranked, q).order);
   });
 
+  it("set_options with plain labels follows the group op's ids in the same batch, warns when that is not reading order, and echoes the mapping", () => {
+    // Q sits higher than P, so Q reads first.
+    const r = applyOps(canon(), [
+      {
+        op: "add",
+        page: 1,
+        type: "checkbox",
+        box: { x: 0.5, y: 0.75, w: 0.02, h: 0.02 },
+        label: "P",
+      },
+      {
+        op: "add",
+        page: 1,
+        type: "checkbox",
+        box: { x: 0.5, y: 0.7, w: 0.02, h: 0.02 },
+        label: "Q",
+      },
+    ]);
+    const [p, q] = r.diff_summary.added.map((x) => x.id);
+    const g = applyOps(r.render, [
+      { op: "group", ids: [p, q], kind: "choice", label: "Pick", ref: "g" },
+      { op: "set_options", id: "$g", options: ["for P", "for Q"] },
+    ]);
+    expect(g.rejected).toEqual([]);
+    expect(field(g.render, p).label).toBe("for P");
+    expect(field(g.render, q).label).toBe("for Q");
+    expect(g.warnings.join("\n")).toMatch(/options_order_differs_from_reading_order/);
+    expect(g.diff_summary.ops[1].options).toEqual([
+      { id: q, label: "for Q" },
+      { id: p, label: "for P" },
+    ]);
+    // In a later call there is no group op to follow: reading order (Q first).
+    const gid = g.diff_summary.added[0].id;
+    const later = applyOps(g.render, [
+      { op: "set_options", id: gid, options: ["first", "second"] },
+    ]);
+    expect(later.rejected).toEqual([]);
+    expect(field(later.render, q).label).toBe("first");
+    expect(field(later.render, p).label).toBe("second");
+    expect(later.warnings.join("\n")).not.toMatch(/options_order_differs_from_reading_order/);
+    expect(later.diff_summary.ops[0].options).toEqual([
+      { id: q, label: "first" },
+      { id: p, label: "second" },
+    ]);
+    // An add_option after the group op makes its ids order stale: reading order again.
+    const grown = applyOps(r.render, [
+      { op: "group", ids: [p, q], kind: "choice", label: "Pick", ref: "g" },
+      { op: "add_option", id: "$g", label: "R", box: { x: 0.5, y: 0.8, w: 0.02, h: 0.02 } },
+      { op: "set_options", id: "$g", options: ["a", "b", "c"] },
+    ]);
+    expect(grown.rejected).toEqual([]);
+    const rid = grown.diff_summary.added[1].id;
+    expect(field(grown.render, q).label).toBe("a");
+    expect(field(grown.render, p).label).toBe("b");
+    expect(field(grown.render, rid).label).toBe("c");
+    expect(grown.warnings.join("\n")).not.toMatch(/options_order_differs_from_reading_order/);
+  });
+
   it("rejects bad ops with reasons and leaves the schema untouched", () => {
     const before = canon();
     const r = applyOps(before, [
