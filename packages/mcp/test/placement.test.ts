@@ -346,8 +346,8 @@ describe("the text layer on a rotated or cropped page", () => {
     page.setRotation(degrees(90));
     const pdf = await doc.save();
     near(await glyphed(pdf), await inked(pdf));
-    // The check copy draws in the page's own frame (pdf-lib, unrotated): its
-    // tags keep off the print there, at 40 pt from the left of the 400 pt width.
+    // printedBoxes stays in the page's own user space (pdf-lib, unrotated; the
+    // check copy maps it onto the visible page): 40 pt from the left of the 400 pt width.
     const drawn = (await printedBoxes(pdf, [1]))[1];
     expect(drawn[0].x).toBeGreaterThan(39);
     expect(drawn[0].x).toBeLessThan(42);

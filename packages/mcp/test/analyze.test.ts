@@ -1,8 +1,10 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, PDFName, type PDFPage, PDFString } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { stampPdf } from "@/app/t/[template_id]/fillCore";
 
 import { analyzeForm, LIVE_OWNERS } from "../src/analyze.js";
 import { FenfillApi } from "../src/api.js";
@@ -15,6 +17,7 @@ import {
   type PendingEntry,
   sha256Hex,
 } from "../src/cache.js";
+import { loadFonts, toArrayBuffer } from "../src/fonts.js";
 import type { AgentSchema, RenderSchema } from "../src/types.js";
 import {
   API_KEY,
@@ -661,6 +664,22 @@ describe("analyze_form refuses non-blank PDFs", () => {
     expect(analyzePosts(mock)).toBe(1);
   });
 
+  it("refuses a PDF filled in the fenfill web app (flattened, FenfillOutput tag) — SEC-04-001", async () => {
+    // The browser's download path: stampPdf with no infoTags, AcroForm flattened.
+    const web = await stampPdf({
+      pdfBytes: toArrayBuffer(pdfBytes),
+      marksByPage: new Map(),
+      fonts: loadFonts(),
+    });
+    const p = join(t.dir, "web-filled.pdf");
+    writeFileSync(p, web);
+    const mock = new MockApi();
+    const r = await (await server(mock)).call("analyze_form", { path: p });
+    expect(r.data.error).toMatchObject({ code: "filled_output" });
+    expect(String((r.data.error as { message: string }).message)).toMatch(/filled with fenfill/);
+    expect(mock.calls).toHaveLength(0);
+  });
+
   it("refuses a PDF whose own form fields are filled in", async () => {
     const doc = await PDFDocument.create();
     const page = doc.addPage([612, 792]);
@@ -673,6 +692,100 @@ describe("analyze_form refuses non-blank PDFs", () => {
     const r = await (await server(mock)).call("analyze_form", { path: p });
     expect(r.data.error).toMatchObject({ code: "prefilled_form" });
     expect(mock.calls).toHaveLength(0);
+  });
+
+  // SEC-11-004 / SEC-08-007: answers typed on the page (Preview, Fill & Sign)
+  // or kept in an XFA datasets packet are not AcroForm values.
+  async function onePage(mutate: (doc: PDFDocument, page: PDFPage) => void): Promise<string> {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([612, 792]);
+    mutate(doc, page);
+    const p = join(t.dir, `markup-${String(Math.random()).slice(2)}.pdf`);
+    writeFileSync(p, await doc.save());
+    return p;
+  }
+  const annot = (doc: PDFDocument, page: PDFPage, a: Record<string, unknown>) =>
+    page.node.addAnnot(
+      doc.context.register(doc.context.obj({ Type: "Annot", Rect: [50, 700, 250, 720], ...a })),
+    );
+  const freeText = () =>
+    onePage((doc, page) => {
+      const ap = doc.context.register(
+        doc.context.flateStream("BT /Helv 12 Tf 2 4 Td (Jane Doe) Tj ET", {
+          Type: "XObject",
+          Subtype: "Form",
+          BBox: [0, 0, 200, 20],
+        }),
+      );
+      annot(doc, page, {
+        Subtype: "FreeText",
+        Contents: PDFString.of("Jane Doe, SSN 123-45-6789"),
+        DA: PDFString.of("/Helv 12 Tf 0 g"),
+        AP: { N: ap },
+      });
+    });
+  const ink = () =>
+    onePage((doc, page) => annot(doc, page, { Subtype: "Ink", InkList: [[60, 705, 90, 715]] }));
+  const xfa = () =>
+    onePage((doc) => {
+      const ctx = doc.context;
+      const ds = ctx.register(
+        ctx.flateStream(
+          '<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data><form1><Name>Jane Doe</Name><SSN>123-45-6789</SSN></form1></xfa:data></xfa:datasets>',
+        ),
+      );
+      doc.catalog.set(
+        PDFName.of("AcroForm"),
+        ctx.register(ctx.obj({ Fields: [], XFA: [PDFString.of("datasets"), ds] })),
+      );
+    });
+
+  it("refuses page annotations with typed text or ink, and XFA data, until confirm_blank", async () => {
+    const mock = new MockApi();
+    const c = await server(mock);
+    for (const [make, what] of [
+      [freeText, /1 annotation/],
+      [ink, /1 annotation/],
+      [xfa, /2 filled-in XFA value/],
+    ] as const) {
+      const r = await c.call("analyze_form", { path: await make() });
+      expect(r.data.error).toMatchObject({ code: "prefilled_form" });
+      const e = r.data.error as { message: string; hint: string };
+      expect(e.message).toMatch(what);
+      expect(e.hint).toMatch(/confirm_blank: true/);
+    }
+    // What was found is spelled out.
+    const r = await c.call("analyze_form", { path: await xfa() });
+    const e = r.data.error as { message: string; found: string[] };
+    expect(e.message).toContain('Found: XFA value "Jane Doe" at form1.Name');
+    expect(e.message).toContain("; XFA value");
+    expect(e.found).toHaveLength(2);
+    const ft = await c.call("analyze_form", { path: await freeText() });
+    expect((ft.data.error as { message: string }).message).toContain(
+      "FreeText annotation on page 1 (FreeText with /Contents)",
+    );
+    expect(mock.calls).toHaveLength(0);
+  });
+
+  it("uploads an annotated PDF once the agent passes confirm_blank", async () => {
+    const mock = new MockApi().analyzeFlow({ jobId: JOB, render, agent, pages: [1] });
+    const c = await server(mock);
+    const p = await freeText();
+    const r = await c.call("analyze_form", { path: p, confirm_blank: true });
+    expect(r.isError).toBe(false);
+    expect(analyzePosts(mock)).toBe(1);
+  });
+
+  it("lets a truly blank PDF through (a link or an issuer's bare box is not an answer)", async () => {
+    const mock = new MockApi().analyzeFlow({ jobId: JOB, render, agent, pages: [1] });
+    const c = await server(mock);
+    const p = await onePage((doc, page) => {
+      annot(doc, page, { Subtype: "Link" });
+      annot(doc, page, { Subtype: "Square" });
+    });
+    const r = await c.call("analyze_form", { path: p });
+    expect(r.isError).toBe(false);
+    expect(analyzePosts(mock)).toBe(1);
   });
 
   it("rejects a non-PDF locally", async () => {
@@ -1027,10 +1140,8 @@ describe("the cache is scoped to the API origin and account", () => {
 describe("a pending job never wedges a file", () => {
   it("force drops a wedged job id and re-posts", async () => {
     const mock: MockApi = new MockApi()
-      .on(
-        "POST",
-        /^\/v1\/forms\/analyze$/,
-        (): Response => accepted(analyzePosts(mock) === 1 ? JOB : JOB2, [1, 2]),
+      .on("POST", /^\/v1\/forms\/analyze$/, (): Response =>
+        accepted(analyzePosts(mock) === 1 ? JOB : JOB2, [1, 2]),
       )
       .on("GET", new RegExp(`^/v1/jobs/${JOB}\\?`), () => apiError(500, "internal_error"))
       .on("GET", new RegExp(`^/v1/jobs/${JOB2}\\?`), () =>
@@ -1048,10 +1159,8 @@ describe("a pending job never wedges a file", () => {
 
   it("drops a job after 3 non-retryable poll failures in a row, then starts afresh", async () => {
     const mock: MockApi = new MockApi()
-      .on(
-        "POST",
-        /^\/v1\/forms\/analyze$/,
-        (): Response => accepted(analyzePosts(mock) === 1 ? JOB : JOB2, [1, 2]),
+      .on("POST", /^\/v1\/forms\/analyze$/, (): Response =>
+        accepted(analyzePosts(mock) === 1 ? JOB : JOB2, [1, 2]),
       )
       .on("GET", new RegExp(`^/v1/jobs/${JOB}\\?`), () => apiError(500, "internal_error"))
       .on("GET", new RegExp(`^/v1/jobs/${JOB2}\\?`), () =>
@@ -1124,10 +1233,8 @@ describe("a pending job never wedges a file", () => {
   it("a plain call resumes a forced re-analysis instead of serving the cache it replaces", async () => {
     let finished = false;
     const mock: MockApi = new MockApi()
-      .on(
-        "POST",
-        /^\/v1\/forms\/analyze$/,
-        (): Response => accepted(analyzePosts(mock) === 1 ? JOB : JOB2, [1, 2]),
+      .on("POST", /^\/v1\/forms\/analyze$/, (): Response =>
+        accepted(analyzePosts(mock) === 1 ? JOB : JOB2, [1, 2]),
       )
       .on("GET", new RegExp(`^/v1/jobs/${JOB}\\?`), () => jobAnswer(JOB, "done", { pages: [1, 2] }))
       .on("GET", new RegExp(`^/v1/jobs/${JOB2}\\?`), () =>

@@ -286,7 +286,7 @@ export function optionsHash(o: AnalyzeOptions, who: ApiIdentity | null = null): 
 export function pagesToSpec(pages: readonly number[]): string {
   const sorted = [...new Set(pages)].sort((a, b) => a - b);
   const parts: string[] = [];
-  for (let i = 0; i < sorted.length; ) {
+  for (let i = 0; i < sorted.length;) {
     let j = i;
     while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
     parts.push(i === j ? String(sorted[i]) : `${String(sorted[i])}-${String(sorted[j])}`);

@@ -31,7 +31,6 @@ export function splitByCoverage<T>(
     const key = pick(cp);
     prevCp = cp;
     // Extend the open run when the face is unchanged; else start a new one.
-    // eslint-disable-next-line @typescript-eslint/prefer-optional-chain -- `current?.key` loses the null-narrowing TS needs for the `current.text` mutation below
     if (current !== undefined && current.key === key) {
       current.text += ch;
     } else {

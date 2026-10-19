@@ -333,9 +333,9 @@ function readText(m: Module, pg: number, heap: Heap): PageText {
 }
 
 /**
- * The printed glyph boxes of each of `pages` in the space the check copy draws
- * in (each page's own user space, in points, bottom-left origin: pdf-lib's,
- * whatever the page's rotation, crop or inherited boxes), for its id tags to
+ * The printed glyph boxes of each of `pages` in each page's own user space (in
+ * points, bottom-left origin: pdf-lib's, whatever the page's rotation, crop or
+ * inherited boxes; the check copy maps them onto the visible page), for its id tags to
  * keep off. A page the renderer can't read (or a missing renderer) gives none:
  * the tags then avoid only the outlines and the stamped values.
  */

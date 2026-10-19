@@ -271,6 +271,23 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
   const writer = { pid: process.pid, started_at: new Date(now()).toISOString(), owner };
   const inFlight = new Map<string, InFlight>();
   const posts = new Set<Promise<unknown>>();
+  // edit_template / save_template on one working copy run one at a time (H-15-001):
+  // each reads the copy, awaits the network or a render, then writes it back,
+  // so two in flight would drop the earlier one's ops. Another process is
+  // caught by the compare before writeEdits.
+  const editLocks = new Map<string, Promise<void>>();
+  const editLock = async (key: string): Promise<() => void> => {
+    const prev = editLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((r) => (release = r));
+    const tail = prev.then(() => mine);
+    editLocks.set(key, tail);
+    await prev;
+    return () => {
+      release();
+      if (editLocks.get(key) === tail) editLocks.delete(key);
+    };
+  };
 
   let apiClient: FenfillApi | null = null;
   const api = (): FenfillApi => {
@@ -481,6 +498,12 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
             'With save_as_template: "public" (default; anyone with the template link can fill it) or "restricted" (members and recipient links only). create_recipient_link needs "restricted".',
           ),
         force: z.boolean().optional().describe("Re-analyze even if cached (costs scans again)."),
+        confirm_blank: z
+          .boolean()
+          .optional()
+          .describe(
+            "Only after a prefilled_form refusal about annotations or XFA values, and only when the user confirms they are part of the blank form, not answers. Never for filled form fields.",
+          ),
         estimate: z
           .boolean()
           .optional()
@@ -1093,130 +1116,152 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         base = async () => ({ ...(await fetchTemplate(tid, signal)), sha: null });
       }
 
-      let discarded = false;
-      if (discard === true) discarded = await cache.deleteEdits(key);
-      let wc = await cache.readEdits(key);
-      if (wc && saveTarget && !sameAccount(wc, who)) wc = null; // another account's copy
-      // Whether this account had local edits before the call (another account's
-      // copy on disk is not one, and a new copy replaces it).
-      const had = wc !== null;
-      const nowIso = new Date(now()).toISOString();
-      if (!wc && ops.length === 0) {
+      const unlock = await editLock(key);
+      try {
+        let discarded = false;
+        if (discard === true) discarded = await cache.deleteEdits(key);
+        let wc = await cache.readEdits(key);
+        // What this call read, to tell whether another process wrote the copy
+        // before this call writes it (updated_at and the content).
+        const seen = wc ? JSON.stringify(wc) : null;
+        const seenAt = wc?.updated_at ?? null;
+        if (wc && saveTarget && !sameAccount(wc, who)) wc = null; // another account's copy
+        // Whether this account had local edits before the call (another account's
+        // copy on disk is not one, and a new copy replaces it).
+        const had = wc !== null;
+        const nowIso = new Date(now()).toISOString();
+        if (!wc && ops.length === 0) {
+          return {
+            target: saveTarget ? { template_id: saveTarget } : { path },
+            applied: 0,
+            rejected: [],
+            ...(discard === true ? { discarded } : {}),
+            has_edits: false,
+          };
+        }
+        if (!wc) {
+          const b = await base();
+          wc = {
+            v: 1,
+            key,
+            template_id: saveTarget,
+            sha256: b.sha,
+            base_updated_at: b.updated_at,
+            base: b.render,
+            render: b.render,
+            created_at: nowIso,
+            updated_at: nowIso,
+            ops_applied: 0,
+            ...(who ? { api_origin: who.api_origin, account: who.account } : {}),
+            writer,
+          };
+        }
+        // The blank PDF (snap and the placement warnings read its render and text
+        // layer, locally): the file itself, or the saved template's, downloaded once.
+        const target = saveTarget;
+        let blankBytes: Promise<Uint8Array> | null = null;
+        const blank = () =>
+          (blankBytes ??= fileBytes
+            ? Promise.resolve(fileBytes)
+            : templateBlank(target as string, signal));
+        const pages = snapPages(ops, (id) => pageOfId(wc.render, id));
+        let snap: Snapper | undefined;
+        if (pages.length) {
+          try {
+            snap = await prepareSnapper(await blank(), pages);
+          } catch (e) {
+            if (e instanceof ToolError && e.code === "invalid_page") throw e;
+            const why = asToolError(e).message;
+            snap = () => ({ none: `no page render (${why})` });
+          }
+        }
+        // The echo guard runs per op, before anything is written: an op whose
+        // wording repeats an answer of this session is rejected, unless a
+        // rejection has named that match before and the agent now confirms it.
+        const r = applyOps(wc.render, ops, (w) => echo.check(w, key), {
+          snap,
+          confirmWording: confirm_wording === true,
+        });
+        let placement: string[] = [];
+        let placementNotes: string[] = [];
+        if (r.applied > 0) {
+          const ids = [
+            ...r.diff_summary.touched.map((t) => t.id),
+            ...r.diff_summary.added.map((a) => a.id),
+          ];
+          const report = await blank()
+            .then((pdf) => placementReport(pdf, r.render, ids, { cells: true }))
+            .catch(() => ({ warnings: [], notes: [] }));
+          placement = report.warnings;
+          placementNotes = report.notes;
+        }
+        // Taking over a copy whose changed wording another process wrote: that
+        // wording stays unvouched until save_template's confirm_wording.
+        const inherited =
+          wc.inherited_wording === true ||
+          (wc.writer?.owner !== owner && changedWording(wc.base, wc.render).length > 0);
+        const out: WorkingCopy = {
+          ...wc,
+          render: r.render,
+          updated_at: nowIso,
+          ops_applied: wc.ops_applied + r.applied,
+          writer,
+          ...(inherited ? { inherited_wording: true as const } : {}),
+        };
+        // A batch that leaves the schema as it was (every op a noop, or ops that
+        // undo each other) writes nothing, so no working copy appears for it.
+        const changed = r.applied > 0 && JSON.stringify(r.render) !== JSON.stringify(wc.render);
+        if (changed) {
+          const current = await cache.readEdits(key);
+          if (
+            (current?.updated_at ?? null) !== seenAt ||
+            (current ? JSON.stringify(current) : null) !== seen
+          ) {
+            throw new ToolError(
+              "edit_conflict",
+              "Another fenfill-mcp process changed this form's local edits while this call ran, so none of its ops were applied.",
+              {
+                hint: "Call edit_template again with the same ops: they then apply on top of the other process's edits (get_template shows the current layout).",
+              },
+            );
+          }
+          await cache.writeEdits(out);
+          // A new template copy supersedes its PDF's own (unsaved-analysis) copy.
+          if (saveTarget && !had) {
+            await dropFileCopies(saveTarget, fileSha).catch(() => undefined);
+          }
+        }
+        // `rejected` tells the agent which wording matched, so from the next call
+        // on it can confirm it; what it confirmed here is not asked about again.
+        echo.tell(r.screened.told);
+        echo.confirm(r.screened.confirmed);
+        const hasEdits = changed || had;
+        const left = hasEdits ? schemaIssues(out.render, 10) : [];
         return {
           target: saveTarget ? { template_id: saveTarget } : { path },
-          applied: 0,
-          rejected: [],
+          applied: r.applied,
+          rejected: r.rejected,
+          diff_summary: r.diff_summary,
           ...(discard === true ? { discarded } : {}),
-          has_edits: false,
+          warnings: [
+            ...r.warnings,
+            ...placement,
+            ...left.map(
+              (i) =>
+                `${i.id ? `${i.id}: ` : ""}${i.path} ${i.reason} (fenfill would refuse to save this; fix it with another op)`,
+            ),
+          ],
+          ...(placementNotes.length ? { notes: placementNotes } : {}),
+          has_edits: hasEdits,
+          ops_applied_total: changed ? out.ops_applied : wc.ops_applied,
+          saveable: !!saveTarget,
+          next: saveTarget
+            ? "Check with preview_page (or fill_form with check_pdf), then save_template to keep the edits in the saved template."
+            : "These edits stay on this machine (fill_form and preview_page use them). This is an unsaved analysis, so save_template can't keep them: to keep corrections, analyze_form with save_as_template: true and edit that template.",
         };
+      } finally {
+        unlock();
       }
-      if (!wc) {
-        const b = await base();
-        wc = {
-          v: 1,
-          key,
-          template_id: saveTarget,
-          sha256: b.sha,
-          base_updated_at: b.updated_at,
-          base: b.render,
-          render: b.render,
-          created_at: nowIso,
-          updated_at: nowIso,
-          ops_applied: 0,
-          ...(who ? { api_origin: who.api_origin, account: who.account } : {}),
-          writer,
-        };
-      }
-      // The blank PDF (snap and the placement warnings read its render and text
-      // layer, locally): the file itself, or the saved template's, downloaded once.
-      const target = saveTarget;
-      let blankBytes: Promise<Uint8Array> | null = null;
-      const blank = () =>
-        (blankBytes ??= fileBytes
-          ? Promise.resolve(fileBytes)
-          : templateBlank(target as string, signal));
-      const pages = snapPages(ops, (id) => pageOfId(wc.render, id));
-      let snap: Snapper | undefined;
-      if (pages.length) {
-        try {
-          snap = await prepareSnapper(await blank(), pages);
-        } catch (e) {
-          if (e instanceof ToolError && e.code === "invalid_page") throw e;
-          const why = asToolError(e).message;
-          snap = () => ({ none: `no page render (${why})` });
-        }
-      }
-      // The echo guard runs per op, before anything is written: an op whose
-      // wording repeats an answer of this session is rejected, unless a
-      // rejection has named that match before and the agent now confirms it.
-      const r = applyOps(wc.render, ops, (w) => echo.check(w, key), {
-        snap,
-        confirmWording: confirm_wording === true,
-      });
-      let placement: string[] = [];
-      let placementNotes: string[] = [];
-      if (r.applied > 0) {
-        const ids = [
-          ...r.diff_summary.touched.map((t) => t.id),
-          ...r.diff_summary.added.map((a) => a.id),
-        ];
-        const report = await blank()
-          .then((pdf) => placementReport(pdf, r.render, ids, { cells: true }))
-          .catch(() => ({ warnings: [], notes: [] }));
-        placement = report.warnings;
-        placementNotes = report.notes;
-      }
-      // Taking over a copy whose changed wording another process wrote: that
-      // wording stays unvouched until save_template's confirm_wording.
-      const inherited =
-        wc.inherited_wording === true ||
-        (wc.writer?.owner !== owner && changedWording(wc.base, wc.render).length > 0);
-      const out: WorkingCopy = {
-        ...wc,
-        render: r.render,
-        updated_at: nowIso,
-        ops_applied: wc.ops_applied + r.applied,
-        writer,
-        ...(inherited ? { inherited_wording: true as const } : {}),
-      };
-      // A batch that leaves the schema as it was (every op a noop, or ops that
-      // undo each other) writes nothing, so no working copy appears for it.
-      const changed = r.applied > 0 && JSON.stringify(r.render) !== JSON.stringify(wc.render);
-      if (changed) {
-        await cache.writeEdits(out);
-        // A new template copy supersedes its PDF's own (unsaved-analysis) copy.
-        if (saveTarget && !had) {
-          await dropFileCopies(saveTarget, fileSha).catch(() => undefined);
-        }
-      }
-      // `rejected` tells the agent which wording matched, so from the next call
-      // on it can confirm it; what it confirmed here is not asked about again.
-      echo.tell(r.screened.told);
-      echo.confirm(r.screened.confirmed);
-      const hasEdits = changed || had;
-      const left = hasEdits ? schemaIssues(out.render, 10) : [];
-      return {
-        target: saveTarget ? { template_id: saveTarget } : { path },
-        applied: r.applied,
-        rejected: r.rejected,
-        diff_summary: r.diff_summary,
-        ...(discard === true ? { discarded } : {}),
-        warnings: [
-          ...r.warnings,
-          ...placement,
-          ...left.map(
-            (i) =>
-              `${i.id ? `${i.id}: ` : ""}${i.path} ${i.reason} (fenfill would refuse to save this; fix it with another op)`,
-          ),
-        ],
-        ...(placementNotes.length ? { notes: placementNotes } : {}),
-        has_edits: hasEdits,
-        ops_applied_total: changed ? out.ops_applied : wc.ops_applied,
-        saveable: !!saveTarget,
-        next: saveTarget
-          ? "Check with preview_page (or fill_form with check_pdf), then save_template to keep the edits in the saved template."
-          : "These edits stay on this machine (fill_form and preview_page use them). This is an unsaved analysis, so save_template can't keep them: to keep corrections, analyze_form with save_as_template: true and edit that template.",
-      };
     }),
   );
 
@@ -1244,178 +1289,185 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
       },
     },
     run("save_template", async ({ template_id, confirm_wording }, _extra, signal) => {
-      const wc = await templateEdits(template_id);
-      if (!wc) {
-        // Nothing to save is a success, not an error: fenfill's copy is already current.
-        return {
-          template_id,
-          saved: false,
-          nothing_to_save: true,
-          note: "No local edits for this template: fenfill's copy is already the current one (e.g. right after a save or reanalyze_template, or before any edit_template). Edits to an unsaved analysis can't be saved: analyze_form with save_as_template: true first, then edit that template.",
-        };
-      }
-
-      // 1. The echo guard: wording that repeats an answer never leaves, unless
-      // the agent has been told which wording matched and confirms it is the
-      // form's own. A match it has not been told about is listed first, even
-      // when the flag is already set.
-      const changed = changedWording(wc.base, wc.render);
-      const echoed = echo.check(changed, wc.key);
-      // Wording an earlier process wrote: this session's guard can't vouch for it.
-      const foreign = wc.writer?.owner !== owner || wc.inherited_wording === true;
-      // What a foreign copy changed: the list of it (shown as ids and
-      // properties) must have been sent before it can be confirmed, and it is
-      // that wording the agent then vouches for, so the digest takes the text.
-      const listing = sha256Hex(JSON.stringify(changed));
-      const unvouched = foreign && changed.length > 0;
-      // At the save every entry has its id: each one that matches must itself
-      // have been named by a refusal before the flag covers it.
-      const confirmable = confirm_wording === true && echoed.refused.every((x) => x.listed);
-      if (echoed.refused.length && !confirmable) {
-        echo.tell(echoed.refused);
-        if (unvouched) listedForeign.set(wc.key, listing);
-        throw new ToolError(
-          "answer_in_template",
-          "Some edited wording matches an answer you filled or previewed in this session, so it was not sent.",
-          {
-            hint: "Compare each property listed in `matched` with the printed form (preview_page's legend shows the wording). An answer: put the form's own wording back with edit_template (relabel / set_description / set_placeholder / set_options / set_section_title). The form's own text: call save_template again with confirm_wording: true.",
-            details: {
-              ids: echoed.refuse,
-              matched: wordingChanges(echoed.refused),
-              ...(unvouched ? { changed: wordingChanges(changed) } : {}),
-            },
-          },
-        );
-      }
-      if (unvouched && !(confirm_wording === true && listedForeign.get(wc.key) === listing)) {
-        listedForeign.set(wc.key, listing);
-        throw new ToolError(
-          "confirm_wording_needed",
-          "This working copy has wording edited in an earlier session, which this session's answer check can't cover, so it was not sent.",
-          {
-            hint: "Review the wording listed in `changed` (those properties of each id) and make sure it is the form's own text, never an answer. Fix anything wrong with edit_template, then call save_template again with confirm_wording: true.",
-            details: { changed: wordingChanges(changed) },
-          },
-        );
-      }
-
-      // 2. What fenfill would refuse, refused here first.
-      const issues = schemaIssues(wc.render);
-      if (issues.length) {
-        throw new ToolError(
-          "invalid_schema",
-          "The edited layout isn't valid, so it was not sent.",
-          {
-            hint: "Fix these items with edit_template, then save again.",
-            details: { details: issues },
-          },
-        );
-      }
-      if (!wc.base_updated_at) {
-        throw new ToolError(
-          "missing_version",
-          "fenfill didn't say which version of this template the edits started from.",
-          {
-            hint: "edit_template with template_id and discard: true, re-apply the ops, then save.",
-          },
-        );
-      }
-
-      // 3. One conditional PATCH (sent once). Pages go back as received (their
-      // images and sizes are the server's), each with the working copy's
-      // sections: a section's title is the form's wording, and an op edits it.
-      const schema = {
-        ...wc.render,
-        pages: wc.base.pages.map((p, i) => {
-          const edited = wc.render.pages[i];
-          return edited?.page === p.page && edited.sections !== undefined
-            ? { ...p, sections: edited.sections }
-            : p;
-        }),
-      };
-      let saved: TemplateUpdated;
+      // One at a time with edit_template on this copy: an edit landing between
+      // this read and the delete after the save would be lost.
+      const unlock = await editLock(editKeyForTemplate(template_id));
       try {
-        saved = await api().patchJson<TemplateUpdated>(
-          `/templates/${encodeURIComponent(template_id)}`,
-          { schema, expected_updated_at: wc.base_updated_at },
-          { signal },
-        );
-      } catch (e) {
-        if (e instanceof ToolError && e.code === "template_conflict") {
-          let server: Record<string, unknown> = {};
-          try {
-            const cur = await fetchTemplate(template_id, signal);
-            server = {
-              current_updated_at: cur.updated_at,
-              server_fields: cur.render.fields.length,
-              server_groups: cur.render.groups.length,
-            };
-          } catch {
-            // the conflict stands on its own
-          }
-          throw new ToolError(e.code, e.message, {
-            hint: e.hint,
-            status: e.status,
-            details: {
-              ...e.details,
-              ...server,
-              local_edits_kept: true,
-              edits_since: wc.created_at,
-            },
-          });
+        const wc = await templateEdits(template_id);
+        if (!wc) {
+          // Nothing to save is a success, not an error: fenfill's copy is already current.
+          return {
+            template_id,
+            saved: false,
+            nothing_to_save: true,
+            note: "No local edits for this template: fenfill's copy is already the current one (e.g. right after a save or reanalyze_template, or before any edit_template). Edits to an unsaved analysis can't be saved: analyze_form with save_as_template: true first, then edit that template.",
+          };
         }
-        if (e instanceof ToolError && e.code === "invalid_schema") {
-          const items = Array.isArray(e.details.details) ? (e.details.details as unknown[]) : [];
-          throw new ToolError(e.code, e.message, {
-            hint: e.hint,
-            status: e.status,
-            details: { ...e.details, details: items.map((it) => withItemId(it, schema)) },
-          });
-        }
-        throw e;
-      }
 
-      // 4. Saved: the server copy is now the edited one (and any unsaved-analysis
-      // copy of its PDF is stale).
-      await cache.deleteEdits(wc.key);
-      listedForeign.delete(wc.key); // a later copy's wording is listed afresh
-      await dropFileCopies(template_id, wc.sha256).catch(() => undefined);
-      await refreshSavedAnalyses(cache, template_id, schema, saved, await identity(false));
-      return {
-        template_id: saved.template_id ?? template_id,
-        saved: true,
-        updated_at: saved.updated_at,
-        // Agent entries (get_template's unit) of the whole saved template.
-        ...(() => {
-          try {
-            const n = agentEntries(
-              normalizeSchema(saved.result as unknown as Parameters<typeof normalizeSchema>[0]),
-            ).length;
-            return { field_count: n, field_count_total: n };
-          } catch {
-            return {};
+        // 1. The echo guard: wording that repeats an answer never leaves, unless
+        // the agent has been told which wording matched and confirms it is the
+        // form's own. A match it has not been told about is listed first, even
+        // when the flag is already set.
+        const changed = changedWording(wc.base, wc.render);
+        const echoed = echo.check(changed, wc.key);
+        // Wording an earlier process wrote: this session's guard can't vouch for it.
+        const foreign = wc.writer?.owner !== owner || wc.inherited_wording === true;
+        // What a foreign copy changed: the list of it (shown as ids and
+        // properties) must have been sent before it can be confirmed, and it is
+        // that wording the agent then vouches for, so the digest takes the text.
+        const listing = sha256Hex(JSON.stringify(changed));
+        const unvouched = foreign && changed.length > 0;
+        // At the save every entry has its id: each one that matches must itself
+        // have been named by a refusal before the flag covers it.
+        const confirmable = confirm_wording === true && echoed.refused.every((x) => x.listed);
+        if (echoed.refused.length && !confirmable) {
+          echo.tell(echoed.refused);
+          if (unvouched) listedForeign.set(wc.key, listing);
+          throw new ToolError(
+            "answer_in_template",
+            "Some edited wording matches an answer you filled or previewed in this session, so it was not sent.",
+            {
+              hint: "Compare each property listed in `matched` with the printed form (preview_page's legend shows the wording). An answer: put the form's own wording back with edit_template (relabel / set_description / set_placeholder / set_options / set_section_title). The form's own text: call save_template again with confirm_wording: true.",
+              details: {
+                ids: echoed.refuse,
+                matched: wordingChanges(echoed.refused),
+                ...(unvouched ? { changed: wordingChanges(changed) } : {}),
+              },
+            },
+          );
+        }
+        if (unvouched && !(confirm_wording === true && listedForeign.get(wc.key) === listing)) {
+          listedForeign.set(wc.key, listing);
+          throw new ToolError(
+            "confirm_wording_needed",
+            "This working copy has wording edited in an earlier session, which this session's answer check can't cover, so it was not sent.",
+            {
+              hint: "Review the wording listed in `changed` (those properties of each id) and make sure it is the form's own text, never an answer. Fix anything wrong with edit_template, then call save_template again with confirm_wording: true.",
+              details: { changed: wordingChanges(changed) },
+            },
+          );
+        }
+
+        // 2. What fenfill would refuse, refused here first.
+        const issues = schemaIssues(wc.render);
+        if (issues.length) {
+          throw new ToolError(
+            "invalid_schema",
+            "The edited layout isn't valid, so it was not sent.",
+            {
+              hint: "Fix these items with edit_template, then save again.",
+              details: { details: issues },
+            },
+          );
+        }
+        if (!wc.base_updated_at) {
+          throw new ToolError(
+            "missing_version",
+            "fenfill didn't say which version of this template the edits started from.",
+            {
+              hint: "edit_template with template_id and discard: true, re-apply the ops, then save.",
+            },
+          );
+        }
+
+        // 3. One conditional PATCH (sent once). Pages go back as received (their
+        // images and sizes are the server's), each with the working copy's
+        // sections: a section's title is the form's wording, and an op edits it.
+        const schema = {
+          ...wc.render,
+          pages: wc.base.pages.map((p, i) => {
+            const edited = wc.render.pages[i];
+            return edited?.page === p.page && edited.sections !== undefined
+              ? { ...p, sections: edited.sections }
+              : p;
+          }),
+        };
+        let saved: TemplateUpdated;
+        try {
+          saved = await api().patchJson<TemplateUpdated>(
+            `/templates/${encodeURIComponent(template_id)}`,
+            { schema, expected_updated_at: wc.base_updated_at },
+            { signal },
+          );
+        } catch (e) {
+          if (e instanceof ToolError && e.code === "template_conflict") {
+            let server: Record<string, unknown> = {};
+            try {
+              const cur = await fetchTemplate(template_id, signal);
+              server = {
+                current_updated_at: cur.updated_at,
+                server_fields: cur.render.fields.length,
+                server_groups: cur.render.groups.length,
+              };
+            } catch {
+              // the conflict stands on its own
+            }
+            throw new ToolError(e.code, e.message, {
+              hint: e.hint,
+              status: e.status,
+              details: {
+                ...e.details,
+                ...server,
+                local_edits_kept: true,
+                edits_since: wc.created_at,
+              },
+            });
           }
-        })(),
-        ...(() => {
-          // Wording that matched an answer and went out on the agent's word,
-          // confirmed at an edit or just now: named once more, by id and property.
-          const vouched = [...echoed.confirmed, ...echoed.refused];
-          const warnings = [
-            ...(vouched.length
-              ? [
-                  `${describeWording(vouched)}: matches an answer filled in this session; saved because you confirmed it is the form's own wording`,
-                ]
-              : []),
-            ...(echoed.warn.length
-              ? [
-                  `${echoed.warn.join(", ")}: short wording that matches a short answer from this session (allowed under 4 characters); check it is the form's own text`,
-                ]
-              : []),
-          ];
-          return warnings.length ? { warnings } : {};
-        })(),
-        next: "fill_template, get_template and recipient links now use the saved layout.",
-      };
+          if (e instanceof ToolError && e.code === "invalid_schema") {
+            const items = Array.isArray(e.details.details) ? (e.details.details as unknown[]) : [];
+            throw new ToolError(e.code, e.message, {
+              hint: e.hint,
+              status: e.status,
+              details: { ...e.details, details: items.map((it) => withItemId(it, schema)) },
+            });
+          }
+          throw e;
+        }
+
+        // 4. Saved: the server copy is now the edited one (and any unsaved-analysis
+        // copy of its PDF is stale).
+        await cache.deleteEdits(wc.key);
+        listedForeign.delete(wc.key); // a later copy's wording is listed afresh
+        await dropFileCopies(template_id, wc.sha256).catch(() => undefined);
+        await refreshSavedAnalyses(cache, template_id, schema, saved, await identity(false));
+        return {
+          template_id: saved.template_id ?? template_id,
+          saved: true,
+          updated_at: saved.updated_at,
+          // Agent entries (get_template's unit) of the whole saved template.
+          ...(() => {
+            try {
+              const n = agentEntries(
+                normalizeSchema(saved.result as unknown as Parameters<typeof normalizeSchema>[0]),
+              ).length;
+              return { field_count: n, field_count_total: n };
+            } catch {
+              return {};
+            }
+          })(),
+          ...(() => {
+            // Wording that matched an answer and went out on the agent's word,
+            // confirmed at an edit or just now: named once more, by id and property.
+            const vouched = [...echoed.confirmed, ...echoed.refused];
+            const warnings = [
+              ...(vouched.length
+                ? [
+                    `${describeWording(vouched)}: matches an answer filled in this session; saved because you confirmed it is the form's own wording`,
+                  ]
+                : []),
+              ...(echoed.warn.length
+                ? [
+                    `${echoed.warn.join(", ")}: short wording that matches a short answer from this session (allowed under 4 characters); check it is the form's own text`,
+                  ]
+                : []),
+            ];
+            return warnings.length ? { warnings } : {};
+          })(),
+          next: "fill_template, get_template and recipient links now use the saved layout.",
+        };
+      } finally {
+        unlock();
+      }
     }),
   );
 

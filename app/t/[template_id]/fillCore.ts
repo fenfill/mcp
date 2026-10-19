@@ -21,9 +21,11 @@ export {
   type AgentType,
   type AgentValuesResult,
   checkTagIds,
+  FENFILL_OUTPUT_TAG,
   fillAgentPdf,
   type FillAgentPdfArgs,
   type FillAgentPdfResult,
+  FILLED_OUTPUT_TAGS,
   hasInfoTag,
   type LoadImage,
   mapAgentValues,
@@ -34,6 +36,8 @@ export {
   prefilledAcroFieldCount,
   prefixHits,
   UnsupportedScriptError,
+  type UserMarkup,
+  userMarkupCount,
 } from "./agentValues";
 export {
   bucketRows,

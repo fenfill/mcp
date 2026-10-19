@@ -30,9 +30,11 @@ import { basename } from "node:path";
 import { setTimeout as sleepTimer } from "node:timers/promises";
 
 import {
+  FILLED_OUTPUT_TAGS,
   hasInfoTag,
-  MCP_OUTPUT_TAG,
   prefilledAcroFieldCount,
+  type UserMarkup,
+  userMarkupCount,
 } from "@/app/t/[template_id]/fillCore";
 
 import type { FenfillApi } from "./api.js";
@@ -132,6 +134,9 @@ export interface AnalyzeArgs {
   /** The saved template's access (save_as_template only). */
   access?: "public" | "restricted";
   force?: boolean;
+  /** The agent checked with the user that the PDF's page annotations / XFA
+   *  data are the form's own, not anyone's answers (lifts that refusal only). */
+  confirm_blank?: boolean;
   /** Only work out the cost, locally: nothing is uploaded. */
   estimate?: boolean;
   /** AcroForm PDFs: also look for blanks without a native field (paid per page). */
@@ -377,6 +382,39 @@ function needsWorkspace(entries: readonly IdentityTagged[], who: ApiIdentity | n
   );
 }
 
+/** The refusal for a PDF with annotations or XFA values: what was found, and
+ *  how to go on (a blank copy, or confirm_blank when they aren't answers). */
+function markupRefusal(m: UserMarkup): ToolError {
+  const found: string[] = [];
+  if (m.annotations > 0) {
+    const pages = m.annotationPages.join(", ");
+    found.push(
+      `${String(m.annotations)} annotation(s) with added content (typed text, ink, a stamp or a shape) on page${m.annotationPages.length > 1 ? "s" : ""} ${pages}`,
+    );
+  }
+  if (m.xfaValues > 0) {
+    found.push(`${String(m.xfaValues)} filled-in XFA value(s)`);
+  }
+  const items = (m.details ?? []).slice(0, 3).map((d) => d.summary);
+  const more = (m.details?.length ?? 0) - items.length;
+  const listed = items.length
+    ? ` Found: ${items.join("; ")}${more > 0 ? `; and ${String(more)} more` : ""}.`
+    : "";
+  return new ToolError(
+    "prefilled_form",
+    `This PDF has ${found.join(" and ")}, which may be someone's answers.${listed} fenfill analyzes blank forms only, and the whole file is uploaded.`,
+    {
+      hint: "Use a blank copy of the form (answers typed with Preview or Acrobat Fill & Sign are annotations; your answers go in fill_form, which runs locally). If the user confirms these are part of the blank form itself (printed notes, sample text, default values), call analyze_form again with confirm_blank: true.",
+      details: {
+        annotations: m.annotations,
+        ...(m.annotationPages.length ? { annotation_pages: m.annotationPages } : {}),
+        xfa_values: m.xfaValues,
+        ...(items.length ? { found: items } : {}),
+      },
+    },
+  );
+}
+
 export async function analyzeForm(
   deps: AnalyzeDeps,
   args: AnalyzeArgs,
@@ -390,7 +428,9 @@ export async function analyzeForm(
   // 1. Blank forms only.
   let tagged: boolean;
   try {
-    tagged = await hasInfoTag(ab, MCP_OUTPUT_TAG);
+    // FenfillOutput (every fenfill fill, the web's flattened downloads too) or
+    // FenfillMcpOutput (this MCP's, also on outputs of older versions).
+    tagged = await hasInfoTag(ab, FILLED_OUTPUT_TAGS);
   } catch {
     throw new ToolError("not_pdf", "The file could not be read as a PDF.", {
       hint: "Pass a valid PDF file.",
@@ -399,9 +439,9 @@ export async function analyzeForm(
   if (tagged || (await deps.cache.isRegisteredOutput(sha))) {
     throw new ToolError(
       "filled_output",
-      "This PDF is a form filled by fenfill-mcp, not a blank form.",
+      "This PDF is a form already filled with fenfill (in the web app or by fill_form), not a blank form.",
       {
-        hint: "Analyze the original blank PDF instead.",
+        hint: "Analyze the original blank PDF instead. To fill the same form again, use its template (fill_template) or fill_form on the blank PDF; the answers stay on this machine.",
       },
     );
   }
@@ -426,6 +466,23 @@ export async function analyzeForm(
         hint: "Use a blank copy of the form. Your answers go in fill_form, which runs locally. If this IS the blank form (some ship with default text or totals in their fields), use the fenfill web app for it instead.",
       },
     );
+  }
+
+  // Answers outside the AcroForm values (SEC-11-004, SEC-08-007): text typed
+  // on the page with Preview or Fill & Sign, ink signatures, stamps, and the
+  // datasets packet of an XFA form. A form can ship with some of these, so the
+  // agent may pass confirm_blank once the user says they are not answers.
+  let markup: UserMarkup;
+  try {
+    markup = await userMarkupCount(ab);
+  } catch (e) {
+    if (isPasswordError(e)) throw passwordError();
+    throw new ToolError("unverifiable_form", "Couldn't verify that this PDF is blank.", {
+      hint: "Open it in the fenfill web app instead (fenfill.com).",
+    });
+  }
+  if (args.confirm_blank !== true && (markup.annotations > 0 || markup.xfaValues > 0)) {
+    throw markupRefusal(markup);
   }
 
   const pageCount = await localPageCount(ab);

@@ -3,6 +3,7 @@
 // import neither a data source nor a store. Input is already-computed marks +
 // branding; output is the saved PDF bytes. The caller owns marks-computation,
 // the blob/download, telemetry, and success state.
+import type * as PdfLibModule from "pdf-lib";
 import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 
 import type { TextAnchor } from "@/types";
@@ -14,7 +15,7 @@ import {
 } from "@/types";
 
 import { bidiAnchor, isRtlDominant, marksNeedBidi, needsBidi, stripBidiControls } from "./bidiText";
-import type { Pct } from "./coords";
+import { type PageFrame, pageFrame, type Pct, pctToFrameRect } from "./coords";
 import { flattenFormFields } from "./flattenForm";
 import {
   inJpFaceRange,
@@ -40,6 +41,11 @@ import {
   TEXT_PAD_PT,
   wrapLines,
 } from "./textFit";
+
+/** Info-dictionary key on every PDF fenfill fills (web, quickfill, mass fill
+ *  and the MCP): analyze_form and /v1 refuse a PDF that carries it. The web
+ *  downloads are flattened, so without it a fenfill fill looks blank. */
+export const FENFILL_OUTPUT_TAG = "FenfillOutput";
 
 export interface Mark {
   key: string;
@@ -99,8 +105,9 @@ export interface StampOptions {
   // Pre-fetched workspace-logo bytes: same batch optimization for
   // branding.logoUrl (which is still required to opt the stamp in).
   logoBytes?: ArrayBuffer | null;
-  // Custom keys written into the output's Info dictionary (the MCP tags its
-  // outputs with MCP_OUTPUT_TAG). The browser never passes it.
+  // Extra keys written into the output's Info dictionary, next to the
+  // FENFILL_OUTPUT_TAG every output gets (the MCP adds MCP_OUTPUT_TAG). The
+  // browser never passes it.
   infoTags?: Record<string, string>;
   // Told how each text mark was laid out (the MCP turns it into placement
   // warnings). Observes only: the stamped bytes are the same with or without
@@ -312,6 +319,44 @@ export function resetJpStampFaceForTests(): void {
 }
 
 /**
+ * Draws on each page in its VISIBLE frame (coords.ts pageFrame: the CropBox as
+ * the viewer turns it by /Rotate, BOTTOM-LEFT origin, points) instead of pdf-lib's
+ * USER SPACE (BOTTOM-LEFT origin, unrotated MediaBox). `frameOf(page)` reads the
+ * page's boxes and rotation and, the first time, opens a graphics state holding
+ * the visible -> user matrix, so everything drawn on that page after it (text,
+ * vector marks, images) lands where the percent box was drawn and reads upright.
+ * `close()` ends every frame opened; call it once, after the last draw. An
+ * unrotated page whose box starts at (0,0) needs no matrix: nothing is written,
+ * so its output stays byte for byte what it was. Shared by stampPdf and the
+ * MCP's check copy (agentValues.ts).
+ */
+export function visibleFrames(pdfLib: typeof PdfLibModule): {
+  frameOf: (page: PDFPage) => PageFrame;
+  close: () => void;
+} {
+  const open = new Map<PDFPage, PageFrame>();
+  const frameOf = (page: PDFPage): PageFrame => {
+    let f = open.get(page);
+    if (!f) {
+      f = pageFrame(page.getMediaBox(), page.getCropBox(), page.getRotation().angle);
+      if (!f.identity) {
+        page.pushOperators(
+          pdfLib.pushGraphicsState(),
+          pdfLib.concatTransformationMatrix(...f.matrix),
+        );
+      }
+      open.set(page, f);
+    }
+    return f;
+  };
+  const close = () => {
+    for (const [page, f] of open) if (!f.identity) page.pushOperators(pdfLib.popGraphicsState());
+    open.clear();
+  };
+  return { frameOf, close };
+}
+
+/**
  * Loads the source PDF, stamps the marks plus the branding/PLG watermark and the
  * workspace logo, and returns the saved bytes. Throws on font-fetch failure; the
  * logo is best-effort and never blocks the result.
@@ -376,6 +421,8 @@ export async function stampPdf({
   // right-to-left character; every other mark draws exactly as before.
   const rtlLayer = marksNeedBidi(marksByPage) ? await import("./rtlStamp") : undefined;
   const pdfPages = pdfDoc.getPages();
+  // Every draw below is in each page's visible frame (closed before saving).
+  const frames = visibleFrames(pdfLib);
 
   const INK = rgb(0.1, 0.1, 0.1);
 
@@ -442,13 +489,9 @@ export async function stampPdf({
     const page = pdfPages[pageNum - 1] as PDFPage | undefined;
     if (!page) return;
     const { box, text, center } = m;
-    const { width: pw, height: ph } = page.getSize();
-    // Percent (top-left) -> PDF points (bottom-left).
-    const x0 = (box.xPct / 100) * pw;
-    const w = (box.wPct / 100) * pw;
-    const h = (box.hPct / 100) * ph;
-    const yTop = (box.yPct / 100) * ph;
-    const y0 = ph - yTop - h;
+    // Percent (visible page, TOP-LEFT origin) -> visible-frame points (BOTTOM-LEFT
+    // origin); the frame's matrix takes them to the page's rotated/cropped user space.
+    const { x: x0, y: y0, w, h } = pctToFrameRect(frames.frameOf(page), box);
     const pad = TEXT_PAD_PT;
 
     // Image mark (signature): embed the PNG/JPG and fit it into the box,
@@ -630,7 +673,7 @@ export async function stampPdf({
     const label = "Made with fenfill.com";
     const size = 7;
     for (const page of pdfPages) {
-      const { width: pw } = page.getSize();
+      const { width: pw } = frames.frameOf(page);
       const tw = helv.widthOfTextAtSize(label, size);
       page.drawText(label, {
         x: pw - tw - 12,
@@ -648,7 +691,7 @@ export async function stampPdf({
     const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const size = 8;
     for (const page of pdfPages) {
-      const { width: pw } = page.getSize();
+      const { width: pw } = frames.frameOf(page);
       const tw = helv.widthOfTextAtSize(watermarkText, size);
       page.drawText(watermarkText, {
         x: (pw - tw) / 2,
@@ -682,7 +725,7 @@ export async function stampPdf({
           : null;
       const page1 = pdfPages[0] as PDFPage | undefined; // empty PDF => no page 1
       if (img && page1) {
-        const { width: pw } = page1.getSize();
+        const { width: pw } = frames.frameOf(page1);
         const h = 24;
         const w = (img.width / img.height) * h;
         page1.drawImage(img, { x: pw - w - 16, y: 16, width: w, height: h });
@@ -692,13 +735,15 @@ export async function stampPdf({
     }
   }
 
-  if (infoTags) {
+  frames.close();
+
+  {
     const { PDFDict, PDFHexString, PDFName } = pdfLib;
     const ctx = pdfDoc.context;
     const found = ctx.lookup(ctx.trailerInfo.Info);
     const info = found instanceof PDFDict ? found : PDFDict.withContext(ctx);
     if (info !== found) ctx.trailerInfo.Info = ctx.register(info);
-    for (const [k, v] of Object.entries(infoTags)) {
+    for (const [k, v] of Object.entries({ [FENFILL_OUTPUT_TAG]: "fenfill", ...infoTags })) {
       info.set(PDFName.of(k), PDFHexString.fromText(v));
     }
   }

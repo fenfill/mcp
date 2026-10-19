@@ -310,16 +310,14 @@ function sectionForPos(d: Doc, page: number, xPct: number, yPct: number): string
   }
   if (best) return typeof best.section_id === "string" ? best.section_id : null;
   const pg = d.s.pages.find((p) => p.page === page) as
-    | { sections?: { id?: unknown }[] }
-    | undefined;
+    { sections?: { id?: unknown }[] } | undefined;
   const first = Array.isArray(pg?.sections) ? pg.sections[0] : undefined;
   return typeof first?.id === "string" ? first.id : null;
 }
 
 function sectionIds(d: Doc, page: number): Set<string> {
   const pg = d.s.pages.find((p) => p.page === page) as
-    | { sections?: { id?: unknown }[] }
-    | undefined;
+    { sections?: { id?: unknown }[] } | undefined;
   const out = new Set<string>();
   for (const s of Array.isArray(pg?.sections) ? pg.sections : []) {
     if (typeof s.id === "string") out.add(s.id);

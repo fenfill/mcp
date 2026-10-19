@@ -23,6 +23,7 @@ import { type Field, type Group, groupFormatOf, type TemplateSchema } from "@/ty
 
 import { needsBidi, stampsRtl, stripBidiControls } from "./bidiText";
 import { combDateWrites, combEntries, type CombSlot, combSlots, isDmyFormat } from "./combFill";
+import { type PageFrame, pctToFrameRect, userRectToFrame } from "./coords";
 import {
   bucketRows,
   buildFieldById,
@@ -37,10 +38,23 @@ import { buildMarks } from "./fillMarks";
 import { marksNeedJpFace, needsJpFace } from "./fontRuns";
 import { normalizeSchema } from "./normalizeSchema";
 import { dataUrlToBytes } from "./signatureImage";
-import { embedStampFaces, type Mark, type Placement, type StampFonts, stampPdf } from "./stampPdf";
+import {
+  embedStampFaces,
+  FENFILL_OUTPUT_TAG,
+  type Mark,
+  type Placement,
+  type StampFonts,
+  stampPdf,
+  visibleFrames,
+} from "./stampPdf";
 
 /** Info-dictionary key the MCP writes into every PDF it fills (and refuses to analyze). */
 export const MCP_OUTPUT_TAG = "FenfillMcpOutput";
+
+/** Every Info key that marks a PDF as a fenfill fill: the one stampPdf writes
+ *  on every output, and the MCP's own (also on outputs of MCP <= 0.2.4). */
+export const FILLED_OUTPUT_TAGS: readonly string[] = [FENFILL_OUTPUT_TAG, MCP_OUTPUT_TAG];
+export { FENFILL_OUTPUT_TAG };
 
 /** A value that was not applied. A nested cell's `id` is `<table id>.<cell id>`,
  *  a table_rows cell's `<table id>[<row>].<column key>`. */
@@ -404,7 +418,7 @@ function sniffImage(b: Uint8Array): ImageKind | null {
 function pngHasAlpha(b: Uint8Array): boolean {
   if (b.length < 26) return false;
   if (b[25] === 4 || b[25] === 6) return true;
-  for (let off = 8; off + 8 <= b.length; ) {
+  for (let off = 8; off + 8 <= b.length;) {
     const len = ((b[off] << 24) | (b[off + 1] << 16) | (b[off + 2] << 8) | b[off + 3]) >>> 0;
     const type = String.fromCharCode(b[off + 4], b[off + 5], b[off + 6], b[off + 7]);
     if (type === "tRNS") return true;
@@ -1345,12 +1359,16 @@ async function drawCheckPdf(
     at.id = id;
   };
   const notes: string[] = [];
-  const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
+  const pdfLib = await import("pdf-lib");
+  const { PDFDocument, StandardFonts, rgb } = pdfLib;
   const doc = await PDFDocument.load(stamped, { updateMetadata: false });
   step("fonts");
   // Ids (tags) and the legend line are ASCII: Helvetica, with no font bytes.
   const helv = await doc.embedFont(StandardFonts.Helvetica);
   const pages = doc.getPages();
+  // Everything is drawn in each page's visible frame (rotated CropBox, BOTTOM-LEFT
+  // origin, points; see stampPdf visibleFrames), as the values were stamped.
+  const frames = visibleFrames(pdfLib);
   const COLORS: Record<CheckStatus, ReturnType<typeof rgb>> = {
     filled: rgb(0.1, 0.55, 0.2),
     warned: rgb(0.9, 0.5, 0),
@@ -1391,26 +1409,20 @@ async function drawCheckPdf(
   const SIZE = 5;
   // Page-point rects of every outline per page: a tag must not cover a box
   // (or another tag) when it has anywhere else to go.
-  const rectOf = (b: Outline, pw: number, ph: number): Rect => {
-    const w = (b.box.wpct / 100) * pw;
-    const h = (b.box.hpct / 100) * ph;
-    return { x: (b.box.xpct / 100) * pw, y: ph - (b.box.ypct / 100) * ph - h, w, h };
-  };
+  // Percent (visible page, TOP-LEFT origin) -> visible-frame points (BOTTOM-LEFT).
+  const rectOf = (b: Outline, f: PageFrame): Rect =>
+    pctToFrameRect(f, { xPct: b.box.xpct, yPct: b.box.ypct, wPct: b.box.wpct, hPct: b.box.hpct });
   const placedTags = new Map<number, Rect[]>();
   // The print and the stamped values of a page, in page points: a tag never
   // covers them when it has anywhere else to go.
   const inkByPage = new Map<number, Rect[]>();
-  const inkOf = (page: number, pw: number, ph: number): Rect[] => {
+  const inkOf = (page: number, f: PageFrame): Rect[] => {
     let ink = inkByPage.get(page);
     if (!ink) {
       ink = [];
-      for (const r of avoid.printed?.[page] ?? []) ink.push({ x: r.x, y: r.y, w: r.w, h: r.h });
-      for (const mk of avoid.marks?.get(page) ?? []) {
-        const b = mk.box;
-        const w = (b.wPct / 100) * pw;
-        const h = (b.hPct / 100) * ph;
-        ink.push({ x: (b.xPct / 100) * pw, y: ph - (b.yPct / 100) * ph - h, w, h });
-      }
+      // The printed boxes come in USER SPACE (BOTTOM-LEFT, unrotated): into the frame.
+      for (const r of avoid.printed?.[page] ?? []) ink.push(userRectToFrame(f, r));
+      for (const mk of avoid.marks?.get(page) ?? []) ink.push(pctToFrameRect(f, mk.box));
       inkByPage.set(page, ink);
     }
     return ink;
@@ -1487,7 +1499,7 @@ async function drawCheckPdf(
       try {
         const { cell, page } = h;
         const prefix = h.axis === "row" ? "R" : "C";
-        const { width: pw, height: ph } = page.getSize();
+        const { width: pw, height: ph } = frames.frameOf(page);
         const cx = (cell.field.xpct / 100) * pw;
         const top = ph - (cell.field.ypct / 100) * ph;
         const w = (cell.field.wpct / 100) * pw;
@@ -1572,9 +1584,9 @@ async function drawCheckPdf(
     step("outline", b.id);
     const page = pages[b.page - 1] as (typeof pages)[number] | undefined;
     if (!page) continue;
-    const { width: pw, height: ph } = page.getSize();
-    // Percent, TOP-LEFT origin → PDF points, BOTTOM-LEFT origin (pdf-lib).
-    const { x, y, w, h } = rectOf(b, pw, ph);
+    const frame = frames.frameOf(page);
+    const { width: pw, height: ph } = frame;
+    const { x, y, w, h } = rectOf(b, frame);
     const color = COLORS[b.st];
     page.drawRectangle({
       x,
@@ -1616,7 +1628,7 @@ async function drawCheckPdf(
       w: w + 2 * (TAG_REACH + tw),
       h: h + 2 * (TAG_REACH + th),
     };
-    const ink = inkOf(b.page, pw, ph).filter((r) => hits(r, win));
+    const ink = inkOf(b.page, frame).filter((r) => hits(r, win));
     const caption = b.thin ? captionSide(self, ink) : null;
     const candidates = b.thin
       ? caption === "left"
@@ -1625,7 +1637,7 @@ async function drawCheckPdf(
       : [above, aboveOther, below, belowRight, side, left];
     const others = boxes
       .filter((o) => o !== b && o.page === b.page && o.id !== b.owner)
-      .map((o) => rectOf(o, pw, ph))
+      .map((o) => rectOf(o, frame))
       .filter((r) => hits(r, win));
     const taken = placedTags.get(b.page) ?? [];
     // Only the tags near enough to matter (every tag is kept for the next box).
@@ -1702,9 +1714,10 @@ async function drawCheckPdf(
       spot =
         [...candidates, inside]
           .filter((c) => onPage(rectAt(c)))
-          .reduce<
-            { x: number; y: number } | undefined
-          >((best, c) => (!best || cost(c) < cost(best) ? c : best), undefined) ?? inside;
+          .reduce<{ x: number; y: number } | undefined>(
+            (best, c) => (!best || cost(c) < cost(best) ? c : best),
+            undefined,
+          ) ?? inside;
     }
     taken.push(rectAt(spot));
     placedTags.set(b.page, taken);
@@ -1735,9 +1748,10 @@ async function drawCheckPdf(
   if (first && banner) {
     const legend =
       "fenfill check copy: green = filled, orange = filled with a warning, red = skipped, grey = left empty. Tags are field-id prefixes.";
-    const { height: ph } = first.getSize();
+    const { height: ph } = frames.frameOf(first);
     first.drawText(legend, { x: 6, y: ph - 7, size: SIZE, font: helv, color: rgb(0.3, 0.3, 0.35) });
   }
+  frames.close();
   step("save");
   return { pdf: await doc.save(), notes };
 }
@@ -1773,7 +1787,8 @@ export interface FillAgentPdfArgs {
    *  leaves the outlines alone, so nothing is drawn over the print beside a box. */
   checkTags?: boolean;
   /** The printed text of the check copy's pages, by page (boxes in each
-   *  page's own points, as it draws): its id tags keep off it, as they keep
+   *  page's own USER SPACE: points, BOTTOM-LEFT origin, unrotated; the check
+   *  copy maps them onto the visible page it draws on): its id tags keep off it, as they keep
    *  off the stamped values. The browser has no text layer to give; the MCP reads it
    *  with PDFium (none on a scan). */
   checkPrinted?: Readonly<Record<number, readonly PageRegion[]>>;
@@ -2030,11 +2045,614 @@ export async function prefilledAcroFieldCount(pdfBytes: ArrayBuffer): Promise<nu
   }
 }
 
-/** Whether the PDF's Info dictionary carries `key` (e.g. MCP_OUTPUT_TAG). */
-export async function hasInfoTag(pdfBytes: ArrayBuffer, key: string): Promise<boolean> {
+/** What a blank-form check sees beyond the AcroForm values (see userMarkupCount). */
+export interface UserMarkup {
+  /** Page annotations that carry content someone added. */
+  annotations: number;
+  /** The 1-based pages they are on. */
+  annotationPages: number[];
+  /** XFA datasets values that differ from the form's own defaults. */
+  xfaValues: number;
+  /** Every counted item, annotations first, and why it counted. Always set. */
+  details?: MarkupDetail[];
+}
+
+/** One item userMarkupCount counted; `summary` is a human-readable line. */
+export type MarkupDetail =
+  | {
+      kind: "xfa";
+      /** The datasets element name the value sits under. */
+      name: string;
+      /** Its path below `<data>`, e.g. `form1.Page1.Name`. */
+      path: string;
+      /** The value, at most 40 characters. */
+      value: string;
+      /** The template default(s) compared against, or "none found". */
+      default: string;
+      rule: "no_template" | "no_default" | "differs_from_default" | "undecodable";
+      summary: string;
+    }
+  | {
+      kind: "annotation";
+      page: number;
+      subtype: string;
+      /** The annotation dictionary's keys, sorted. */
+      keys: string[];
+      /** /F, or null when absent. */
+      flags: number | null;
+      /** /M as written, or null. */
+      modified: string | null;
+      /** The document's /CreationDate as written, or null. */
+      creationDate: string | null;
+      /** What made it count. */
+      trace: string;
+      summary: string;
+    };
+
+const clip = (s: string, n = 40) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// Shapes and stamps: what Preview and Acrobat add as a check mark, a circled
+// answer or a signature, but also what an issuer ships on a blank (an
+// "OMB approved" stamp, a box around a section). See markupAnnot for the split.
+const SHAPES = new Set(["Stamp", "Square", "Circle", "Line", "Polygon", "PolyLine"]);
+// Annotation /F bits (PDF 32000-1 §12.5.3): ReadOnly (7), Locked (8),
+// LockedContents (10). Neither Preview nor Fill & Sign sets them on what they add.
+const F_LOCKED = (1 << 6) | (1 << 7) | (1 << 9);
+
+/** A PDF date (`D:YYYYMMDDHHmmSSOHH'mm'`) as epoch ms; NaN when unreadable. */
+function pdfDateMs(s: string): number {
+  const m =
+    /^(?:D:)?(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:([Zz+-])(\d{2})?'?(\d{2})?'?)?/.exec(
+      s.trim(),
+    );
+  if (!m) return NaN;
+  const n = (v: string | undefined, d: number) => (v === undefined ? d : Number(v));
+  const t = Date.UTC(Number(m[1]), n(m[2], 1) - 1, n(m[3], 1), n(m[4], 0), n(m[5], 0), n(m[6], 0));
+  if (m[7] !== "+" && m[7] !== "-") return t;
+  const off = (n(m[8], 0) * 60 + n(m[9], 0)) * 60_000;
+  return m[7] === "+" ? t - off : t + off;
+}
+
+// ---- XFA ------------------------------------------------------------------------------------
+
+type XmlToken =
+  | { kind: "open"; name: string; attrs: string; empty: boolean }
+  | { kind: "close"; name: string }
+  | { kind: "text"; text: string };
+
+function xmlEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|lt|gt|amp|quot|apos);/gi, (all, e: string) => {
+    const k = e.toLowerCase();
+    if (k.startsWith("#")) {
+      const cp = k.startsWith("#x") ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10);
+      return Number.isFinite(cp) && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
+    }
+    const named: Record<string, string | undefined> = {
+      lt: "<",
+      gt: ">",
+      amp: "&",
+      quot: '"',
+      apos: "'",
+    };
+    return named[k] ?? all;
+  });
+}
+
+/** A forgiving XML tokenizer: element names lose their namespace prefix;
+ *  comments, PIs and doctypes are dropped; CDATA is text. */
+function* xmlTokens(xml: string): Generator<XmlToken> {
+  const re =
+    /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<(\/?)([\w.:-]+)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>|([^<]+)/g;
+  for (const match of xml.matchAll(re)) {
+    const m = match as (string | undefined)[];
+    if (m[1] !== undefined) yield { kind: "text", text: m[1] };
+    else if (m[3] !== undefined) {
+      const name = m[3].replace(/^[\w.-]*:/, "");
+      yield m[2]
+        ? { kind: "close", name }
+        : { kind: "open", name, attrs: m[4] ?? "", empty: m[5] === "/" };
+    } else if (m[6] !== undefined) yield { kind: "text", text: xmlEntities(m[6]) };
+  }
+}
+
+function xmlAttr(attrs: string, name: string): string | undefined {
+  const m = new RegExp(`(?:^|\\s)(?:[\\w.-]+:)?${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(
+    attrs,
+  );
+  if (!m) return undefined;
+  const g = m as (string | undefined)[];
+  return xmlEntities(g[1] ?? g[2] ?? "");
+}
+
+/** Whitespace-only differences never make a value someone's answer. */
+const xfaNorm = (s: string) => s.replace(/\s+/g, " ").trim();
+
+/** What the blank form itself puts under one data node. */
+interface XfaSlot {
+  /** Normalized values the form supplies on its own. */
+  defaults: Set<string>;
+  /** Whether any field bound here takes input (not readOnly / protected /
+   *  nonInteractive, not hidden / inactive). */
+  editable: boolean;
+}
+
+/** Where the template's fields bind their data (see xfaTemplateBindings). */
+interface XfaBindings {
+  /** By data path below `<data>`, indexes dropped: `form1.Page1.Name`. */
+  byPath: Map<string, XfaSlot>;
+  /** `match="global"` fields, by name: they bind a node of that name anywhere. */
+  global: Map<string, XfaSlot>;
+  /** Every bound field by the last step of its path, for data a path doesn't
+   *  reach (scopes this reading gets wrong). */
+  byName: Map<string, XfaSlot>;
+  /** AcroForm /DV values by field name (last step, index dropped). */
+  dv: Map<string, Set<string>>;
+}
+
+interface XfaFieldCtx {
+  name: string;
+  /** "normal" | "none" | "global" | "dataRef" (XFA 3.3 §4 `bind.match`). */
+  match: string;
+  ref: string;
+  value: string | null;
+  items: string[][];
+  check: boolean;
+  editable: boolean;
+  isGroup: boolean;
+  group: XfaFieldCtx | null;
+  defaults: Set<string>;
+}
+
+/** The steps of a SOM reference, `[n]` / `[*]` dropped. */
+const somSteps = (ref: string) =>
+  ref
+    .split(".")
+    .map((s) => s.replace(/\[[^\]]*\]$/, "").trim())
+    .filter(Boolean);
+
+/** A bind ref as a data path, given the data scope it is read in; null when it
+ *  leaves the data DOM. `$` is the current data scope, `$record` the root
+ *  subform's record, `$data` the `<data>` element; a bare ref is relative. */
+function resolveXfaRef(ref: string, scope: readonly string[]): string[] | null {
+  const steps = somSteps(ref);
+  const head = steps[0] ?? "";
+  if (head === "$") return [...scope, ...steps.slice(1)];
+  if (head === "$record") return [...scope.slice(0, 1), ...steps.slice(1)];
+  if (head === "$data") return steps.slice(1);
+  if (head.startsWith("$") || head.startsWith("!")) return null;
+  return [...scope, ...steps];
+}
+
+/**
+ * Where the template packet's fields bind data, and what each supplies; null
+ * when the XML holds no `<template>`. A named subform opens a data scope (its
+ * name below its parent's), an unnamed one or one bound `none` doesn't, one
+ * bound by `dataRef` opens the ref's. A field (or exclGroup) binds by name in
+ * its scope (`match="normal"`), at its ref (`dataRef`), by name anywhere
+ * (`global`), or not at all (`none`); an exclGroup's member fields bind
+ * through the group. Its defaults: its own `<value>` (not a caption's), a check
+ * button's off state (the second `<items>` entry, `0` when it has none), and
+ * for an exclGroup every member's default and off state.
+ */
+function xfaTemplateBindings(xml: string): XfaBindings | null {
+  const b: XfaBindings = { byPath: new Map(), global: new Map(), byName: new Map(), dv: new Map() };
+  type Frame = {
+    tag: string;
+    ctx?: XfaFieldCtx;
+    near?: XfaFieldCtx;
+    valueCtx?: XfaFieldCtx;
+    itemCtx?: XfaFieldCtx;
+    items?: boolean;
+    /** A subform's data scope, and the one it was opened in. */
+    scope?: string[];
+    base?: string[];
+  };
+  const stack: Frame[] = [];
+  let seen = false;
+  let depth = -1; // stack depth of the open <template>
+  const scopeOf = () => {
+    for (let k = stack.length - 1; k >= 0; k--) {
+      const s = stack[k].scope;
+      if (s) return s;
+    }
+    return [];
+  };
+  const put = (m: Map<string, XfaSlot>, key: string, c: XfaFieldCtx) => {
+    const s = m.get(key) ?? { defaults: new Set<string>(), editable: false };
+    for (const d of c.defaults) s.defaults.add(d);
+    s.editable ||= c.editable;
+    m.set(key, s);
+  };
+  const close = (f: Frame) => {
+    const c = f.ctx;
+    if (!c) return;
+    if (c.value !== null && xfaNorm(c.value)) c.defaults.add(xfaNorm(c.value));
+    if (c.check) {
+      if (c.items.length === 0) c.defaults.add("0");
+      for (const list of c.items) if (list.length > 1) c.defaults.add(xfaNorm(list[1]));
+    }
+    if (c.group) {
+      for (const d of c.defaults) c.group.defaults.add(d);
+      return; // a member binds through its exclGroup
+    }
+    if (c.match === "none") return;
+    if (c.match === "global") {
+      if (c.name) {
+        put(b.global, c.name, c);
+        put(b.byName, c.name, c);
+      }
+      return;
+    }
+    const path =
+      c.match === "dataRef"
+        ? resolveXfaRef(c.ref, scopeOf())
+        : c.name
+          ? [...scopeOf(), c.name]
+          : null;
+    if (!path?.length) return;
+    put(b.byPath, path.join("."), c);
+    put(b.byName, path[path.length - 1], c);
+  };
+  for (const t of xmlTokens(xml)) {
+    if (t.kind === "open") {
+      if (depth < 0) {
+        if (t.name !== "template") continue;
+        seen = true;
+        depth = stack.length;
+        if (t.empty) depth = -1;
+        else stack.push({ tag: t.name, scope: [] });
+        continue;
+      }
+      const p = stack[stack.length - 1];
+      const f: Frame = { tag: t.name, near: p.near };
+      if (t.name === "field" || t.name === "exclGroup") {
+        const access = xmlAttr(t.attrs, "access") ?? "";
+        const presence = xmlAttr(t.attrs, "presence") ?? "";
+        f.ctx = f.near = {
+          name: xmlAttr(t.attrs, "name") ?? "",
+          match: "normal",
+          ref: "",
+          value: null,
+          items: [],
+          check: false,
+          editable:
+            !["readOnly", "protected", "nonInteractive"].includes(access) &&
+            !["hidden", "inactive"].includes(presence),
+          isGroup: t.name === "exclGroup",
+          group: t.name === "field" && p.ctx?.isGroup ? p.ctx : null,
+          defaults: new Set(),
+        };
+      } else if (t.name === "subform") {
+        const base = scopeOf();
+        const name = xmlAttr(t.attrs, "name");
+        f.base = base;
+        f.scope = name ? [...base, name] : base;
+      } else if (p.ctx && t.name === "value") {
+        f.valueCtx = p.ctx;
+        p.ctx.value = "";
+      } else if (p.ctx && t.name === "items") {
+        f.items = true;
+        f.itemCtx = p.ctx;
+        p.ctx.items.push([]);
+      } else if (p.items && p.itemCtx) {
+        p.itemCtx.items[p.itemCtx.items.length - 1].push("");
+        f.itemCtx = p.itemCtx;
+      } else if (t.name === "bind" && (p.ctx || p.base)) {
+        const match = xmlAttr(t.attrs, "match") ?? "once";
+        const ref = xmlAttr(t.attrs, "ref") ?? "";
+        if (p.ctx) {
+          if (match === "none" || match === "global") p.ctx.match = match;
+          else if (match === "dataRef" && ref) {
+            p.ctx.match = "dataRef";
+            p.ctx.ref = ref;
+          }
+        } else if (p.base) {
+          if (match === "none") p.scope = p.base;
+          else if (match === "dataRef" && ref) p.scope = resolveXfaRef(ref, p.base) ?? p.scope;
+        }
+      } else if (t.name === "checkButton" && f.near) {
+        f.near.check = true;
+      } else {
+        f.valueCtx = p.valueCtx;
+        f.itemCtx = p.items ? undefined : p.itemCtx;
+      }
+      if (t.empty) close(f);
+      else stack.push(f);
+    } else if (t.kind === "close") {
+      if (depth < 0) continue;
+      const f = stack.pop();
+      if (f) close(f);
+      if (stack.length <= depth) depth = -1;
+    } else if (depth >= 0) {
+      const f = stack[stack.length - 1];
+      if (f.valueCtx && f.valueCtx.value !== null) f.valueCtx.value += t.text;
+      else if (f.itemCtx && !f.items) {
+        const list = f.itemCtx.items[f.itemCtx.items.length - 1];
+        if (list.length) list[list.length - 1] += t.text;
+      }
+    }
+  }
+  return seen ? b : null;
+}
+
+/**
+ * The values under an XFA datasets packet's `<data>` element (CDATA too) that
+ * the blank form doesn't supply itself. A value is a leaf element's own text,
+ * whitespace collapsed; text on an element that has child elements (a subform's
+ * data group) is not. Its field is the one bound at its path, else a `global`
+ * field of its name, else any bound field of its name. With a template
+ * (`hasTemplate`), a value no field binds doesn't count: no one can type into
+ * a field that doesn't exist. A bound value counts unless no field there takes
+ * input or it equals one of the defaults (template, plus AcroForm /DV, see
+ * userMarkupCount). Without a template every value counts unless it equals the
+ * /DV of a field of its name.
+ */
+function xfaDataValues(
+  xml: string,
+  bindings: XfaBindings | null,
+  hasTemplate: boolean,
+): MarkupDetail[] {
+  type Frame = { tag: string; text: string; parent: boolean };
+  const stack: Frame[] = [];
+  let data = -1; // stack depth of <data>
+  const n: MarkupDetail[] = [];
+  // Start at the datasets packet: a whole XDP's template comes first.
+  const ds = /<([\w.-]+:)?datasets\b/.exec(xml);
+  if (ds) xml = xml.slice(ds.index);
+  const done = (f: Frame) => {
+    const v = xfaNorm(f.text);
+    if (!v || f.parent) return;
+    const steps = stack
+      .slice(data + 1)
+      .map((x) => x.tag)
+      .concat([f.tag]);
+    const path = steps.join(".");
+    const s =
+      bindings?.byPath.get(path) ?? bindings?.global.get(f.tag) ?? bindings?.byName.get(f.tag);
+    if (!s && hasTemplate) return;
+    const dv = bindings?.dv.get(f.tag);
+    if (dv?.has(v)) return;
+    if (s && (!s.editable || s.defaults.has(v))) return;
+    const defaults = [...(s?.defaults ?? []), ...(dv ?? [])];
+    const rule = defaults.length ? "differs_from_default" : !s ? "no_template" : "no_default";
+    const value = clip(v);
+    const def = defaults.length
+      ? clip(defaults.map((d) => JSON.stringify(d)).join(" | "))
+      : "none found";
+    const why = {
+      no_template: "the form has no XFA template to compare with",
+      no_default: "its field has no default",
+      differs_from_default: `the default is ${def}`,
+    }[rule];
+    n.push({
+      kind: "xfa",
+      name: f.tag,
+      path,
+      value,
+      default: def,
+      rule,
+      summary: `XFA value ${JSON.stringify(value)} at ${path} (${why})`,
+    });
+  };
+  for (const t of xmlTokens(xml)) {
+    if (t.kind === "open") {
+      const parent = stack.at(-1);
+      if (data < 0 && t.name === "data" && (!parent || parent.tag === "datasets")) {
+        if (t.empty) return n;
+        data = stack.length;
+      }
+      if (parent) parent.parent = true;
+      if (!t.empty) stack.push({ tag: t.name, text: "", parent: false });
+    } else if (t.kind === "close") {
+      const f = stack.pop();
+      if (data >= 0 && f) {
+        done(f);
+        if (stack.length <= data) return n;
+      }
+    } else if (data >= 0 && stack.length > data) {
+      stack[stack.length - 1].text += t.text;
+    }
+  }
+  // An unterminated packet: what is still open counts too.
+  if (data >= 0) {
+    for (let f = stack.pop(); f && stack.length >= data; f = stack.pop()) done(f);
+  }
+  return n;
+}
+
+/**
+ * The content a person may have added to a PDF outside its AcroForm values,
+ * which `prefilledAcroFieldCount` does not see. Throws when the PDF can't be
+ * read.
+ *
+ * Annotations: FreeText with /Contents or an appearance, a Text note with
+ * /Contents, and Ink always count. A stamp or shape (SHAPES) counts when it
+ * carries an authoring trace: /Contents, an author /T, /RC, an /IT intent, an
+ * `AAPL:` key, or a /M later than the document's /CreationDate (any /M when
+ * there is none) unless its /F is ReadOnly, Locked or LockedContents. That is
+ * what the tools people use write: macOS Preview (PDFKit) sets /T to the
+ * user's name, /M, and its `AAPL:AKExtras` dictionary on everything it adds;
+ * Acrobat's comment tools and Fill & Sign set /T, /M and /CreationDate (Fill &
+ * Sign's text is FreeText, /IT /FreeTextTypeWriter); pdf.js's editor sets /M.
+ * A stamp or shape without any of that, or a locked one stamped before the
+ * document was made, is the issuer's: some official blanks ship them.
+ *
+ * XFA: the values of the datasets packet that sit in a field someone can type
+ * into and differ from what the form supplies itself (xfaDataValues): the
+ * template packet's defaults for the field bound there (xfaTemplateBindings
+ * resolves `<bind>`) and the /DV of the AcroForm field of the same name.
+ * Government XFA blanks ship datasets full of such defaults (dates, country
+ * codes, zeros, option states) and of data no field binds. With no template
+ * packet (or one that can't be decoded) every non-empty value counts, as does a
+ * datasets stream that can't be decoded (fail-closed).
+ */
+export async function userMarkupCount(pdfBytes: ArrayBuffer): Promise<UserMarkup> {
+  const pdfLib = await import("pdf-lib");
+  const { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFStream } = pdfLib;
+  let doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true, updateMetadata: false });
+  if (doc.isEncrypted) {
+    const { decryptPdf } = await import("./decryptPdf");
+    doc = await PDFDocument.load(await decryptPdf(pdfBytes), { updateMetadata: false });
+  }
+  const text = (v: unknown) =>
+    v instanceof pdfLib.PDFString || v instanceof pdfLib.PDFHexString ? v.decodeText().trim() : "";
+  const nameOrText = (v: unknown) => (v instanceof PDFName ? v.decodeText() : text(v));
+
+  let created = NaN;
+  let createdRaw: string | null = null;
+  try {
+    const info = doc.context.lookup(doc.context.trailerInfo.Info);
+    if (info instanceof PDFDict) createdRaw = text(info.lookup(PDFName.of("CreationDate"))) || null;
+    created = doc.getCreationDate()?.getTime() ?? NaN;
+  } catch {
+    // An unreadable /CreationDate: every /M is then later.
+  }
+  /** What makes the annotation someone's markup, or null when it isn't. */
+  const markupTrace = (a: PDFDict, type: string): string | null => {
+    const contents = text(a.lookup(PDFName.of("Contents")));
+    if (type === "Ink") return "Ink (always counted)";
+    if (type === "FreeText") {
+      if (contents !== "") return "FreeText with /Contents";
+      return a.has(PDFName.of("AP")) ? "FreeText with an appearance (/AP)" : null;
+    }
+    if (type === "Text") return contents !== "" ? "Text note with /Contents" : null;
+    if (!SHAPES.has(type)) return null;
+    const traces: string[] = [];
+    if (contents !== "") traces.push("/Contents");
+    if (text(a.lookup(PDFName.of("T"))) !== "") traces.push("/T author");
+    if (a.has(PDFName.of("RC"))) traces.push("/RC");
+    if (a.has(PDFName.of("IT"))) traces.push("/IT");
+    if (a.keys().some((k) => k.decodeText().startsWith("AAPL:"))) traces.push("AAPL: key");
+    if (traces.length) return traces.join(", ");
+    const m = text(a.lookup(PDFName.of("M")));
+    if (m === "") return null;
+    const f = a.lookup(PDFName.of("F"));
+    const locked = f instanceof PDFNumber && (f.asNumber() & F_LOCKED) !== 0;
+    if (locked || pdfDateMs(m) <= created) return null;
+    return Number.isNaN(created)
+      ? "/M with no /CreationDate to compare"
+      : "/M later than /CreationDate";
+  };
+  const details: MarkupDetail[] = [];
+
+  let annotations = 0;
+  const annotationPages: number[] = [];
+  doc.getPages().forEach((page, i) => {
+    const list = page.node.lookup(PDFName.of("Annots"));
+    if (!(list instanceof PDFArray)) return;
+    let here = 0;
+    for (let k = 0; k < list.size(); k++) {
+      const a = list.lookup(k);
+      if (!(a instanceof PDFDict)) continue;
+      const sub = a.lookup(PDFName.of("Subtype"));
+      const type = sub instanceof PDFName ? sub.decodeText() : "";
+      const trace = markupTrace(a, type);
+      if (trace === null) continue;
+      here++;
+      const f = a.lookup(PDFName.of("F"));
+      const modified = text(a.lookup(PDFName.of("M"))) || null;
+      details.push({
+        kind: "annotation",
+        page: i + 1,
+        subtype: type,
+        keys: a
+          .keys()
+          .map((key) => key.decodeText())
+          .sort(),
+        flags: f instanceof PDFNumber ? f.asNumber() : null,
+        modified,
+        creationDate: createdRaw,
+        trace,
+        summary: `${type || "untyped"} annotation on page ${String(i + 1)} (${trace})`,
+      });
+    }
+    if (here > 0) {
+      annotations += here;
+      annotationPages.push(i + 1);
+    }
+  });
+
+  let xfaValues = 0;
+  const acro = doc.catalog.lookup(PDFName.of("AcroForm"));
+  const xfa = acro instanceof PDFDict ? acro.lookup(PDFName.of("XFA")) : undefined;
+  const decode = (st: unknown) => {
+    if (!(st instanceof PDFRawStream)) throw new Error("not a stream");
+    return new TextDecoder("utf-8").decode(pdfLib.decodePDFRawStream(st).decode());
+  };
+  // An XFA array alternates packet names and streams; a lone stream is the
+  // whole XDP (or, as some writers do, just the datasets packet).
+  const datasets: unknown[] = [];
+  const others: unknown[] = [];
+  if (xfa instanceof PDFArray) {
+    for (let k = 0; k + 1 < xfa.size(); k += 2) {
+      (text(xfa.lookup(k)) === "datasets" ? datasets : others).push(xfa.lookup(k + 1));
+    }
+  } else if (xfa instanceof PDFStream) {
+    datasets.push(xfa);
+    others.push(xfa);
+  }
+  if (datasets.length === 0) return { annotations, annotationPages, xfaValues, details };
+
+  let bindings: XfaBindings | null = null;
+  try {
+    bindings = xfaTemplateBindings(others.map(decode).join("\n"));
+  } catch {
+    bindings = null; // an undecodable template: as if there were none
+  }
+  const hasTemplate = bindings !== null;
+  // AcroForm /DV (static XFA forms mirror their fields as `form1[0].Name[0]`).
+  const fields = acro instanceof PDFDict ? acro.lookup(PDFName.of("Fields")) : undefined;
+  const dvs: [string, string][] = [];
+  const walk = (node: unknown, depth: number) => {
+    if (!(node instanceof PDFDict) || depth > 32) return;
+    const dv = xfaNorm(nameOrText(node.lookup(PDFName.of("DV"))));
+    const t = text(node.lookup(PDFName.of("T"))).replace(/\[\d+\]$/, "");
+    if (dv && t) dvs.push([t, dv]);
+    const kids = node.lookup(PDFName.of("Kids"));
+    if (kids instanceof PDFArray)
+      for (let k = 0; k < kids.size(); k++) walk(kids.lookup(k), depth + 1);
+  };
+  if (fields instanceof PDFArray) for (let k = 0; k < fields.size(); k++) walk(fields.lookup(k), 0);
+  if (dvs.length) {
+    bindings ??= { byPath: new Map(), global: new Map(), byName: new Map(), dv: new Map() };
+    for (const [name, dv] of dvs) {
+      const set = bindings.dv.get(name) ?? new Set<string>();
+      set.add(dv);
+      bindings.dv.set(name, set);
+    }
+  }
+
+  for (const st of datasets) {
+    try {
+      const found = xfaDataValues(decode(st), bindings, hasTemplate);
+      xfaValues += found.length;
+      details.push(...found);
+    } catch {
+      xfaValues += 1;
+      details.push({
+        kind: "xfa",
+        name: "",
+        path: "",
+        value: "",
+        default: "none found",
+        rule: "undecodable",
+        summary: "an XFA datasets stream that can't be decoded",
+      });
+    }
+  }
+  return { annotations, annotationPages, xfaValues, details };
+}
+
+/** Whether the PDF's Info dictionary carries `key`, or one of `key` when it is
+ *  a list (e.g. FILLED_OUTPUT_TAGS). */
+export async function hasInfoTag(
+  pdfBytes: ArrayBuffer,
+  key: string | readonly string[],
+): Promise<boolean> {
   const pdfLib = await import("pdf-lib");
   const opts = { ignoreEncryption: true, updateMetadata: false };
   const doc = await pdfLib.PDFDocument.load(pdfBytes, opts);
   const info = doc.context.lookup(doc.context.trailerInfo.Info);
-  return info instanceof pdfLib.PDFDict && info.has(pdfLib.PDFName.of(key));
+  if (!(info instanceof pdfLib.PDFDict)) return false;
+  return (typeof key === "string" ? [key] : key).some((k) => info.has(pdfLib.PDFName.of(k)));
 }

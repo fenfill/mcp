@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.5
+
+### Added
+
+- `analyze_form`: `confirm_blank: true`, for annotations or XFA form data that belong to the blank
+  form itself (printed notes, sample text, default values). Pass it only after a `prefilled_form`
+  refusal about them and once the user confirms they are not answers; it never lifts the check on
+  filled-in form fields.
+- Every PDF fenfill fills now carries a `FenfillOutput` tag, including the web app's flattened
+  downloads, so a filled copy is recognised wherever it ends up.
+
+### Fixed
+
+- `analyze_form` refuses PDFs fenfill already filled (in the web app or by `fill_form`) with
+  `filled_output`, instead of treating a flattened web download as a blank form.
+- `analyze_form` refuses PDFs with answers added outside the form fields (text, ink or stamps
+  from Preview or Acrobat Fill & Sign) or filled-in XFA form data, with `prefilled_form`; the
+  refusal says what it found (`details.found`). Markup and XFA defaults that ship with the blank
+  form are not counted.
+- `edit_template`: concurrent calls no longer lose edits. Calls on one form in the same process run
+  one after another (as do `save_template` calls); when another fenfill-mcp process changes the
+  form's edits mid-call, nothing is applied and `edit_conflict` asks you to call again with the
+  same ops.
+- `fill_form` and `preview_page` on rotated pages (`/Rotate` 90/180/270) or pages whose crop box
+  does not start at the corner: values, check-copy outlines and id tags land where they belong
+  and print upright, instead of transposed, shifted or sideways.
+
 ## 0.2.4
 
 ### Added

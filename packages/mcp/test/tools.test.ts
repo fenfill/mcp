@@ -1,7 +1,7 @@
 // preview_page, edit_template, save_template and detect_extra_blanks, end to
 // end over the MCP client (mocked /v1).
 
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { PDFDocument } from "pdf-lib";
@@ -20,6 +20,7 @@ import {
   MockApi,
   pdfFor,
   reId,
+  testIdentity,
   tmp,
   virtualClock,
 } from "./helpers.js";
@@ -290,6 +291,88 @@ describe("values keyed by short ids", () => {
     expect(String((e.data.rejected as { reason: string }[])[0].reason)).toMatch(
       /matches an answer filled in this session/,
     );
+  });
+});
+
+describe("concurrent edit_template calls (H-15-001)", () => {
+  const editsFile = () => join(cacheDir, "edits", `t-${TPL}.json`);
+  const labelOf = (wc: { render: RenderSchema }, id: string) =>
+    wc.render.fields.find((f) => f.id === id)?.label;
+
+  it("two calls in flight on one template both land", async () => {
+    const { mock } = templateMock(await pdfFor(render));
+    const c = await server(mock);
+    const [a, b] = await Promise.all([
+      c.call("edit_template", {
+        template_id: TPL,
+        ops: [{ op: "relabel", id: nameId, label: "Full legal name" }],
+      }),
+      c.call("edit_template", {
+        template_id: TPL,
+        ops: [{ op: "relabel", id: cityId, label: "Town" }],
+      }),
+    ]);
+    expect(a.data).toMatchObject({ applied: 1, has_edits: true });
+    expect(b.data).toMatchObject({ applied: 1, has_edits: true });
+    const wc = JSON.parse(readFileSync(editsFile(), "utf8")) as {
+      render: RenderSchema;
+      ops_applied: number;
+    };
+    expect(labelOf(wc, nameId)).toBe("Full legal name");
+    expect(labelOf(wc, cityId)).toBe("Town");
+    expect(wc.ops_applied).toBe(2);
+  });
+
+  it("refuses to overwrite a copy another process wrote meanwhile", async () => {
+    const { mock } = templateMock(await pdfFor(render));
+    // Another process writes its copy after this call has read the (absent) one.
+    let other: Record<string, unknown> | null = null;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!other && url.includes("include=render")) {
+        const theirs: RenderSchema = JSON.parse(JSON.stringify(render));
+        theirs.fields.find((f) => f.id === bornId)!.label = "Birth date (other process)";
+        const iso = "2026-10-04T12:00:00.000Z";
+        other = {
+          v: 1,
+          key: `t-${TPL}`,
+          template_id: TPL,
+          sha256: null,
+          base_updated_at: V1,
+          base: render,
+          render: theirs,
+          created_at: iso,
+          updated_at: iso,
+          ops_applied: 1,
+          ...testIdentity(),
+          writer: { pid: 1, started_at: iso, owner: "other-process" },
+        };
+        mkdirSync(join(cacheDir, "edits"), { recursive: true });
+        writeFileSync(editsFile(), JSON.stringify(other));
+      }
+      return mock.fetch(input, init);
+    }) as typeof fetch;
+    const c = await connect({ env: env(cacheDir), fetchImpl, ...virtualClock() });
+    open.push(c);
+    const r = await c.call("edit_template", {
+      template_id: TPL,
+      ops: [{ op: "relabel", id: nameId, label: "Full legal name" }],
+    });
+    expect(r.data.error).toMatchObject({ code: "edit_conflict" });
+    expect(String((r.data.error as { hint: string }).hint)).toMatch(/again/);
+    // The other process's edit survives; this call wrote nothing.
+    const wc = JSON.parse(readFileSync(editsFile(), "utf8")) as { render: RenderSchema };
+    expect(labelOf(wc, bornId)).toBe("Birth date (other process)");
+    expect(labelOf(wc, nameId)).not.toBe("Full legal name");
+    // Called again, it applies on top of that copy.
+    const again = await c.call("edit_template", {
+      template_id: TPL,
+      ops: [{ op: "relabel", id: nameId, label: "Full legal name" }],
+    });
+    expect(again.data).toMatchObject({ applied: 1 });
+    const after = JSON.parse(readFileSync(editsFile(), "utf8")) as { render: RenderSchema };
+    expect(labelOf(after, bornId)).toBe("Birth date (other process)");
+    expect(labelOf(after, nameId)).toBe("Full legal name");
   });
 });
 

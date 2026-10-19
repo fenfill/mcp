@@ -99,6 +99,8 @@ const HINTS: Record<string, string> = {
   pdf_password_required:
     "The PDF needs a password to open. Save a copy without the open password, then analyze that.",
   pdf_fill_forbidden: "The PDF's author forbids filling it in, so fenfill can't process it.",
+  filled_output:
+    "This PDF is a form already filled with fenfill. Analyze the original blank PDF instead; your answers go in fill_form, which runs locally.",
   too_many_pages:
     "Analyze the document in chunks with `pages` (the message says how). fill_form merges the chunks into one form.",
   rate_limited: "Too many requests for this key. Wait the retry_after seconds, then retry.",

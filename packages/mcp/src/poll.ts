@@ -59,8 +59,7 @@ export interface PollSpec {
 }
 
 export type PollOutcome =
-  | { done: JobBody }
-  | { running: { progress: number; phase: string | null } };
+  { done: JobBody } | { running: { progress: number; phase: string | null } };
 
 export async function pollJobLoop(spec: PollSpec): Promise<PollOutcome> {
   const { api, jobId, store, hints } = spec;
