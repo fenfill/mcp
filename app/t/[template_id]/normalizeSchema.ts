@@ -26,6 +26,7 @@
 //    (first non-default cell wins) so no line carries conflicting cell types.
 //    checkbox_matrix is exempt (it is always all-checkbox).
 
+import { MAX_GRID_DIM } from "@/lib/validation/limits";
 import {
   type Cell,
   type CheckboxFormat,
@@ -147,6 +148,13 @@ function normalizeGroup(g: RawGroup | null): Group | null {
   return g as Group;
 }
 
+// H-07-004: stored rows/cols are untrusted and unbounded; clamp to the same cap
+// the write gate enforces so header allocation / line loops can't throw or freeze.
+function clampDim(n: unknown): number {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return 0;
+  return Math.min(Math.floor(n), MAX_GRID_DIM);
+}
+
 // Pad/trim a header array to exactly `len`, keeping existing labels and filling
 // the rest with empty strings. Returns the same array reference when it already
 // matches (so the idempotent path produces no churn).
@@ -165,10 +173,11 @@ function withTableDefaults(g: Group): Group {
   // Group type is optimistic); keep them honestly nullable so `grid[0]?.length`
   // stays a real `number | undefined` and the header-length fallback survives.
   const grid: ((string | null)[] | null)[] = Array.isArray(g.grid) ? g.grid : [];
-  const cols =
-    g.cols ?? grid[0]?.length ?? (Array.isArray(g.header_cols) ? g.header_cols.length : 0);
+  const cols = clampDim(
+    g.cols ?? grid[0]?.length ?? (Array.isArray(g.header_cols) ? g.header_cols.length : 0),
+  );
   // grid.length is always a number, so a further `?? header_rows.length` was dead.
-  const rows = g.rows ?? grid.length;
+  const rows = clampDim(g.rows ?? grid.length);
   const orientation = g.orientation === "row" ? "row" : "col";
   const header_cols = fitHeaders(g.header_cols, cols);
   const header_rows = fitHeaders(g.header_rows, rows);
@@ -209,7 +218,9 @@ function collapseDrivingAxis(g: Group, byId: Map<string, Field>): void {
   const grid: ((string | null)[] | null)[] | undefined = g.grid;
   if (!Array.isArray(grid)) return;
   const axis = g.orientation === "row" ? "row" : "col";
-  const lineCount = axis === "col" ? (g.cols ?? grid[0]?.length ?? 0) : (g.rows ?? grid.length);
+  const lineCount = clampDim(
+    axis === "col" ? (g.cols ?? grid[0]?.length ?? 0) : (g.rows ?? grid.length),
+  );
   for (let i = 0; i < lineCount; i++) {
     const ids =
       axis === "col"

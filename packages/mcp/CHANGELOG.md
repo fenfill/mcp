@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.6
+
+### Security
+
+- Dependency updates for published advisories: `@modelcontextprotocol/sdk` 1.32.2, `zod` 4.6.7,
+  and through them `body-parser` 2.4.0 and `qs` 6.17.1. fenfill-mcp talks to your agent over
+  stdio only, so the SDK's HTTP-transport and server-auth advisories did not reach it; the zod
+  fix (memory exhaustion on oversized collections) does apply to its in-process validation.
+
+### Fixed
+
+- Templates whose stored tables claim absurd row or column counts are clamped on load (to 1000),
+  so a malformed template can no longer stall filling, previewing or editing.
+
 ## 0.2.5
 
 ### Added
