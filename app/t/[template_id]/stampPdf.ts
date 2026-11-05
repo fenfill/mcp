@@ -71,6 +71,10 @@ export interface Mark {
   // shrinks to width; multiline wraps only, no vertical shrink), so the size control
   // is authoritative. Set for every text/date value mark by fillMarks.
   autoFit?: boolean;
+  // Single-line Auto only: the box height (percent of the page) the Auto start size
+  // is computed from, when the field shares one with its neighbours (autoSize.ts).
+  // Absent => the mark's own box height.
+  autoHPct?: number;
   // An image mark (e.g. a signature) carries a client-side data-URL instead of
   // text; `stamp()` embeds it into the box aspect-preserved. Mutually exclusive
   // with a non-empty `text`. The bytes never leave the browser (zero-retention).
@@ -636,7 +640,8 @@ export async function stampPdf({
     // box width (down to MIN_FONT_SIZE) and place the line at its 9-point anchor. On
     // Auto the start is derived from the box HEIGHT (autoTextStartPt) so short boxes
     // get proportionate text; a pinned size starts at exactly that size.
-    const startPt = m.autoFit ? autoTextStartPt(h) : (m.fontSize ?? DEFAULT_FONT_SIZE);
+    const autoH = m.autoHPct != null ? (h * m.autoHPct) / m.box.hPct : h;
+    const startPt = m.autoFit ? autoTextStartPt(autoH) : (m.fontSize ?? DEFAULT_FONT_SIZE);
     const size = fitFontSize(body, w - 2 * pad, startPt, measureText);
     const tw = measureText(body, size);
     const { x, y } = anchorPdfXY({

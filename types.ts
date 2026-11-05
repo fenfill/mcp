@@ -72,8 +72,9 @@ export type Primitive = "string" | "number" | "boolean" | "date" | "file";
 // Per-type formatting. Interpret by Field.type: text -> TextFormat,
 // checkbox -> CheckboxFormat, date -> DateFormat, signature -> SignatureFormat.
 export type TextVariant = "any" | "number" | "currency" | "multiline";
-// The 9-point anchor for a single-line text value inside its box. Absent =>
-// DEFAULT_TEXT_ANCHOR ("middle-left": vertically centered, flush left). Source of
+// The 9-point anchor for a single-line text value inside its box. Absent => the
+// variant's default (defaultTextAnchorFor: "middle-left", vertically centered and
+// flush left, except number/currency "middle-right" and multiline "top-left"). Source of
 // truth; schemas.py's TextAnchor enum + templateSchema.ts's TEXT_ANCHORS mirror it
 // (same hand-maintained parity as SIGNING_REQUIREMENTS).
 export const TEXT_ANCHORS = [
@@ -95,7 +96,7 @@ export interface TextFormat {
   // and shrinks it horizontally to fit the box width, never below MIN_FONT_SIZE.
   font_size?: number | null;
   // 9-point placement of the text within the box (see TEXT_ANCHORS). Optional/
-  // additive: absent => DEFAULT_TEXT_ANCHOR.
+  // additive: absent => defaultTextAnchorFor(variant).
   text_anchor?: TextAnchor;
   // Force the filler's entry to BLOCK CAPITALS — the paper-form "please write in
   // capital letters" convention. Optional/additive: absent => false. Applied at
@@ -312,14 +313,23 @@ export function hasExplicitFontSize(field: Pick<Field, "type" | "format">): bool
   return (field.format as TextFormat | undefined)?.font_size != null;
 }
 
-// A text field's 9-point anchor. Defaults to DEFAULT_TEXT_ANCHOR ("middle-left")
-// for single-line text, but to "top-left" for a multi-line field (long-form text
-// fills a tall box from the top). An explicit text_anchor always wins.
+// The anchor a text variant defaults to: "top-left" for multi-line (long-form text
+// fills a tall box from the top), "middle-right" for number / currency (amounts
+// line up on their last digit, as in a printed money column), else
+// DEFAULT_TEXT_ANCHOR ("middle-left"). acroform_export.py mirrors it (/Q).
+export function defaultTextAnchorFor(variant: TextVariant | undefined): TextAnchor {
+  if (variant === "multiline") return "top-left";
+  if (variant === "number" || variant === "currency") return "middle-right";
+  return DEFAULT_TEXT_ANCHOR;
+}
+
+// A text field's 9-point anchor: an explicit text_anchor always wins, else its
+// variant's default (defaultTextAnchorFor).
 export function textAnchorOf(field: Pick<Field, "type" | "format">): TextAnchor {
   if (field.type !== "text") return DEFAULT_TEXT_ANCHOR;
   const f = field.format as TextFormat | undefined;
   if (f?.text_anchor) return f.text_anchor;
-  return f?.variant === "multiline" ? "top-left" : DEFAULT_TEXT_ANCHOR;
+  return defaultTextAnchorFor(f?.variant);
 }
 
 // Whether a text field forces block capitals. False for any non-text field.
@@ -345,7 +355,7 @@ export function textFormatOf(field: Pick<Field, "type" | "format">): TextFormat 
   return {
     variant,
     font_size: f?.font_size ?? null,
-    text_anchor: f?.text_anchor ?? (variant === "multiline" ? "top-left" : DEFAULT_TEXT_ANCHOR),
+    text_anchor: f?.text_anchor ?? defaultTextAnchorFor(variant),
     uppercase: f?.uppercase ?? false,
   };
 }

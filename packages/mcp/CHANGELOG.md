@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.7
+
+### Added
+
+- `make_fillable`: turns one of your saved templates into a blank fillable PDF, the original form
+  with a real form field on every blank, so it fills in any PDF reader. Only the template id is
+  sent and the fields stay empty: it takes no values. Needs the Team plan or above.
+- `make_fillable`: when fenfill couldn't place some of the template's fields (a page outside the
+  PDF or a broken box), the result says so with `skipped_fields` (the count) and a `skipped_note`
+  on how to fix them. It reads the new `X-Fenfill-Skipped-Fields` response header of
+  `POST /v1/forms/acroform`.
+
+### Changed
+
+- `fill_template`: number and currency fields now default to middle-right alignment, as in the web
+  app. A field with its own alignment keeps it.
+- `fill_template`: neighbouring Auto-size boxes of nearly one height (a stack, a row, or two cells
+  of a table) now start at one shared size, so their text matches instead of each box picking its
+  own.
+
+### Fixed
+
+- Tables whose rows put two cells into one column (a narrow No. or tick column beside wide ones)
+  no longer lose a cell when their grid is rebuilt; the grid now matches the one fenfill builds.
+
 ## 0.2.6
 
 ### Security

@@ -1,4 +1,4 @@
-// The MCP server: twelve tools over /v1 plus local filling, previews and
+// The MCP server: thirteen tools over /v1 plus local filling, previews and
 // layout corrections.
 //
 // PRIVACY: fill values arrive as the `values` argument of fill_form /
@@ -52,6 +52,7 @@ import { asToolError, ToolError } from "./errors.js";
 import {
   checkPathFor,
   LOGO_SENTINEL,
+  writeOutputAtomic,
   readInputPdf,
   resolveOutputPath,
   type JpFaceSource,
@@ -115,6 +116,7 @@ const TOOL_NAMES = [
   "analyze_form",
   "fill_form",
   "fill_template",
+  "make_fillable",
   "list_templates",
   "get_template",
   "create_recipient_link",
@@ -137,7 +139,7 @@ const VALUE_SHAPES =
 const INSTRUCTIONS = [
   "fenfill turns blank PDF forms into fillable ones.",
   "Local file: analyze_form(path) returns the form's fields (the blank form is uploaded once; results are cached, repeat calls are free), then fill_form(path, values, output_path) fills it on this machine.",
-  "Saved templates: list_templates → get_template → fill_template.",
+  "Saved templates: list_templates → get_template → fill_template; make_fillable writes one as a blank fillable PDF for any PDF reader (Team plan or above).",
   "preview_page shows a page with every field box outlined and tagged (rendered on this machine); edit_template fixes a misplaced, missing or mislabeled field locally; save_template keeps the fix in a saved template.",
   "A saved template's page that was never analyzed (get_template unanalyzed_pages) or came out badly: reanalyze_template re-runs fenfill on just those pages, from the PDF already stored with it.",
   "Fill values never leave this machine: they are not sent to fenfill or anywhere else.",
@@ -182,6 +184,17 @@ const CHECK_PDF = z
   .describe(
     "Also write <output>.check.pdf beside it: the filled PDF with every field box outlined (green filled, orange warning, red skipped, grey empty) and tagged with its id prefix. Open it to verify placement; it stays on this machine.",
   );
+
+/** POST /forms/acroform's X-Fenfill-Skipped-Fields: a positive count, else 0. */
+function skippedFields(header: string | null): number {
+  if (header === null || !/^\d{1,9}$/.test(header.trim())) return 0;
+  return Number(header.trim());
+}
+
+function skippedNote(n: number): string {
+  const what = n === 1 ? "1 field couldn't be placed" : `${n} fields couldn't be placed`;
+  return `${what} (a page outside the PDF or a broken box) and ${n === 1 ? "is" : "are"} not in this PDF. get_template shows ${n === 1 ? "it" : "them"}; fix or delete ${n === 1 ? "it" : "them"}, save_template, then call make_fillable again.`;
+}
 
 function ok(result: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(result) }] };
@@ -699,6 +712,62 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           : { template_id, ...res };
       },
     ),
+  );
+
+  // ---- make_fillable -------------------------------------------------------------------
+  // Downloads a saved template as a blank PDF with real form fields. Only the
+  // template id is sent: this tool takes no values.
+  server.registerTool(
+    "make_fillable",
+    {
+      title: "Make a fillable PDF from a saved template",
+      description:
+        "Turn one of your saved fenfill templates into a blank fillable PDF: the original form with a real form field on every blank, so it can be filled in any PDF reader. The fields are empty; this tool takes no values and never sends any (only the template id goes to fenfill). Uses the template as saved in fenfill: unsaved local edits (edit_template) are not in it, so save_template first. Needs the Team plan or above; to fill the form yourself, use fill_template (any plan). If some fields couldn't be placed, the result has skipped_fields and a skipped_note saying how to fix them.",
+      inputSchema: {
+        template_id: TEMPLATE_ID,
+        output_path: OUTPUT_PATH,
+        overwrite: OVERWRITE,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    run("make_fillable", async ({ template_id, output_path, overwrite }, _extra, signal) => {
+      const replace = overwrite === true;
+      const outputAbs = await resolveOutputPath(output_path, {
+        inputAbs: null,
+        overwrite: replace,
+        cacheRoot: cache.root,
+      });
+      const { bytes: pdf, headers } = await api().postBytesWithHeaders(
+        "/forms/acroform",
+        { template_id },
+        { signal, deadline: now() + 60_000 },
+      );
+      const skipped = skippedFields(headers.get("x-fenfill-skipped-fields"));
+      if (Buffer.from(pdf.subarray(0, 1024)).toString("latin1").indexOf("%PDF-") === -1) {
+        throw new ToolError("bad_response", "fenfill sent something that isn't a PDF.", {
+          hint: "Retry shortly.",
+        });
+      }
+      await writeOutputAtomic(outputAbs, pdf, replace);
+      const edited = (await templateEdits(template_id)) !== null;
+      return {
+        template_id,
+        output_path: outputAbs,
+        bytes: pdf.byteLength,
+        ...(skipped > 0 ? { skipped_fields: skipped, skipped_note: skippedNote(skipped) } : {}),
+        ...(edited
+          ? {
+              edited_note:
+                "Made from the saved template: your unsaved local edits (edit_template) are not in this PDF. save_template keeps them, then call make_fillable again.",
+            }
+          : {}),
+      };
+    }),
   );
 
   // ---- templates ------------------------------------------------------------------------

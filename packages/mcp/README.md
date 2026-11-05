@@ -97,20 +97,21 @@ On native Windows, if the client can't find `npx`, use `"command": "cmd"` with
 
 ## Tools
 
-| Tool                    | What it does                                                                                          |
-| ----------------------- | ----------------------------------------------------------------------------------------------------- |
-| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards.                       |
-| `fill_form`             | Fills an analyzed PDF locally (your answers never leave your machine) and writes a new flattened PDF. |
-| `fill_template`         | Fills a saved fenfill template locally.                                                               |
-| `list_templates`        | Lists the workspace's saved templates, newest first.                                                  |
-| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                                       |
-| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template.                              |
-| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                                        |
-| `get_account`           | Shows the plan, page scans left and limits.                                                           |
-| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.                             |
-| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.                         |
-| `save_template`         | Saves `edit_template`'s working copy to a saved template.                                             |
-| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff.                       |
+| Tool                    | What it does                                                                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards.                            |
+| `fill_form`             | Fills an analyzed PDF locally (your answers never leave your machine) and writes a new flattened PDF.      |
+| `fill_template`         | Fills a saved fenfill template locally.                                                                    |
+| `make_fillable`         | Writes a saved template as a blank fillable PDF (real form fields) for any PDF reader. Team plan or above. |
+| `list_templates`        | Lists the workspace's saved templates, newest first.                                                       |
+| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                                            |
+| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template.                                   |
+| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                                             |
+| `get_account`           | Shows the plan, page scans left and limits.                                                                |
+| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.                                  |
+| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.                              |
+| `save_template`         | Saves `edit_template`'s working copy to a saved template.                                                  |
+| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff.                            |
 
 `analyze_form` options: `pages` (e.g. `"1-3,5"`; long PDFs can be analyzed in chunks, and
 `fill_form` merges them), `save_as_template` (also keep it as a fenfill template), `access`

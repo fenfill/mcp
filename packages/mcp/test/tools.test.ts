@@ -1607,3 +1607,159 @@ describe("analyze_form detect_extra_blanks", () => {
     expect(jobs).toHaveLength(2);
   });
 });
+
+describe("make_fillable", () => {
+  const pdfResponse = (bytes: Uint8Array) =>
+    new Response(new Uint8Array(bytes), { headers: { "content-type": "application/pdf" } });
+
+  it("writes the blank fillable PDF and returns its path and size; sends only the id", async () => {
+    const tplPdf = await pdfFor(render);
+    const mock = new MockApi().on("POST", /^\/v1\/forms\/acroform$/, () => pdfResponse(tplPdf));
+    const c = await server(mock);
+    const out = join(t.dir, "fillable.pdf");
+    const r = await c.call("make_fillable", { template_id: TPL, output_path: out });
+    expect(r.isError).toBe(false);
+    expect(r.data).toMatchObject({ template_id: TPL, output_path: out, bytes: tplPdf.byteLength });
+    expect(r.data.edited_note).toBeUndefined();
+    expect(r.data.skipped_fields).toBeUndefined();
+    expect(r.data.skipped_note).toBeUndefined();
+    expect(new Uint8Array(readFileSync(out))).toEqual(tplPdf);
+    const post = mock.calls.find((x) => x.method === "POST")!;
+    expect(JSON.parse(post.body)).toEqual({ template_id: TPL });
+    expect(post.headers["content-type"]).toBe("application/json");
+    expect(mock.calls).toHaveLength(1);
+  });
+
+  it("reports fields the server couldn't place (X-Fenfill-Skipped-Fields)", async () => {
+    const tplPdf = await pdfFor(render);
+    const mock = new MockApi().on(
+      "POST",
+      /^\/v1\/forms\/acroform$/,
+      () =>
+        new Response(new Uint8Array(tplPdf), {
+          headers: { "content-type": "application/pdf", "x-fenfill-skipped-fields": "2" },
+        }),
+    );
+    const c = await server(mock);
+    const out = join(t.dir, "skipped.pdf");
+    const r = await c.call("make_fillable", { template_id: TPL, output_path: out });
+    expect(r.isError).toBe(false);
+    expect(r.data).toMatchObject({ output_path: out, skipped_fields: 2 });
+    expect(r.data.skipped_note).toMatch(/^2 fields couldn't be placed/);
+    expect(r.data.skipped_note).toMatch(/get_template/);
+    expect(r.data.skipped_note).toMatch(/save_template, then call make_fillable again/);
+    expect(r.data.edited_note).toBeUndefined();
+    expect(new Uint8Array(readFileSync(out))).toEqual(tplPdf);
+  });
+
+  it("ignores a zero or malformed skipped header", async () => {
+    const tplPdf = await pdfFor(render);
+    for (const value of ["0", "-1", "two", "1.5", ""]) {
+      const mock = new MockApi().on(
+        "POST",
+        /^\/v1\/forms\/acroform$/,
+        () =>
+          new Response(new Uint8Array(tplPdf), {
+            headers: { "content-type": "application/pdf", "x-fenfill-skipped-fields": value },
+          }),
+      );
+      const c = await server(mock);
+      const r = await c.call("make_fillable", {
+        template_id: TPL,
+        output_path: join(t.dir, `h${value || "empty"}.pdf`),
+      });
+      expect(r.isError, value).toBe(false);
+      expect(r.data.skipped_fields, value).toBeUndefined();
+      expect(r.data.skipped_note, value).toBeUndefined();
+    }
+  });
+
+  it("carries the skipped note and the unsaved-edits note side by side", async () => {
+    const tplPdf = await pdfFor(render);
+    const { mock } = templateMock(tplPdf);
+    mock.on(
+      "POST",
+      /^\/v1\/forms\/acroform$/,
+      () =>
+        new Response(new Uint8Array(tplPdf), {
+          headers: { "content-type": "application/pdf", "x-fenfill-skipped-fields": "1" },
+        }),
+    );
+    const c = await server(mock);
+    const e = await c.call("edit_template", {
+      template_id: TPL,
+      ops: [{ op: "relabel", id: nameId, label: "Full legal name" }],
+    });
+    expect(e.data).toMatchObject({ applied: 1, has_edits: true });
+    const r = await c.call("make_fillable", {
+      template_id: TPL,
+      output_path: join(t.dir, "both.pdf"),
+    });
+    expect(r.isError).toBe(false);
+    expect(r.data.skipped_fields).toBe(1);
+    expect(r.data.skipped_note).toMatch(/^1 field couldn't be placed .* is not in this PDF/);
+    expect(r.data.edited_note).toMatch(/unsaved local edits/);
+  });
+
+  it("plan_required is a tool error that names the plan and the local alternative", async () => {
+    const mock = new MockApi().on("POST", /^\/v1\/forms\/acroform$/, () =>
+      apiError(403, "plan_required"),
+    );
+    const c = await server(mock);
+    const out = join(t.dir, "fillable.pdf");
+    const r = await c.call("make_fillable", { template_id: TPL, output_path: out });
+    expect(r.isError).toBe(true);
+    expect(r.data.error).toMatchObject({ code: "plan_required" });
+    const text = JSON.stringify(r.data.error);
+    expect(text).toMatch(/Team plan or above/);
+    expect(text).toMatch(/fill_template/);
+    expect(walk(t.dir).filter((p) => p.endsWith(".pdf"))).toEqual([]);
+  });
+
+  it("refuses an existing output_path without overwrite (before any request), replaces it with", async () => {
+    const tplPdf = await pdfFor(render);
+    const mock = new MockApi().on("POST", /^\/v1\/forms\/acroform$/, () => pdfResponse(tplPdf));
+    const c = await server(mock);
+    const out = join(t.dir, "taken.pdf");
+    writeFileSync(out, "old");
+    const r = await c.call("make_fillable", { template_id: TPL, output_path: out });
+    expect(r.data.error).toMatchObject({ code: "output_exists" });
+    expect(readFileSync(out, "utf8")).toBe("old");
+    expect(mock.calls).toHaveLength(0);
+    const again = await c.call("make_fillable", {
+      template_id: TPL,
+      output_path: out,
+      overwrite: true,
+    });
+    expect(again.isError).toBe(false);
+    expect(new Uint8Array(readFileSync(out))).toEqual(tplPdf);
+  });
+
+  it("maps other refusals and a non-PDF body to tool errors", async () => {
+    for (const [status, code] of [
+      [404, "not_found"],
+      [403, "template_frozen"],
+      [422, "pdf_fill_forbidden"],
+    ] as const) {
+      const mock = new MockApi().on("POST", /^\/v1\/forms\/acroform$/, () =>
+        apiError(status, code),
+      );
+      const c = await server(mock);
+      const r = await c.call("make_fillable", {
+        template_id: TPL,
+        output_path: join(t.dir, `${code}.pdf`),
+      });
+      expect(r.data.error, code).toMatchObject({ code });
+    }
+    const mock = new MockApi().on("POST", /^\/v1\/forms\/acroform$/, () =>
+      json(200, { not: "a pdf" }),
+    );
+    const c = await server(mock);
+    const r = await c.call("make_fillable", {
+      template_id: TPL,
+      output_path: join(t.dir, "odd.pdf"),
+    });
+    expect(r.data.error).toMatchObject({ code: "bad_response" });
+    expect(walk(t.dir).filter((p) => p.endsWith(".pdf"))).toEqual([]);
+  });
+});

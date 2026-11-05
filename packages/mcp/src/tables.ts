@@ -241,9 +241,11 @@ function checkIndex(v: unknown, n: number, name: string): number {
 }
 
 // A package-local copy of the editor's grouping.ts reconstructGrid +
-// clusterCenters (pure box geometry, a port of pipeline.py:_reconstruct_grid):
+// clusterCenters + splitCollidingColumns (pure box geometry, a port of
+// pipeline_refine.py:_reconstruct_grid):
 // grouping.ts also carries the comb-date heuristics this package doesn't use.
-// tableGrid.parity.test.ts (repo root) pins it to the editor's on random grids.
+// tableGrid.parity.test.ts (repo root) pins it to the editor's on random grids,
+// colliding columns included.
 
 /** Cluster 1-D positions, splitting on gaps > `gap`; each cluster's mean. */
 function clusterCenters(centers: number[], gap: number): number[] {
@@ -286,26 +288,76 @@ export function reconstructGrid(members: readonly Pct[]): {
     if (last && Math.abs(cy(m) - cy(last[last.length - 1])) <= medH * 0.5) last.push(m);
     else rowsArr.push([m]);
   }
-  const colCenters = clusterCenters(members.map(cx), medW * 0.5);
-  const colFor = (m: Pct): number => {
-    const c = cx(m);
-    let best = 0;
-    let bestD = Infinity;
-    colCenters.forEach((cc, i) => {
-      const d = Math.abs(c - cc);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
-      }
-    });
-    return best;
-  };
-  const grid = rowsArr.map((row) => {
-    const cells: (string | null)[] = Array.from({ length: colCenters.length }, () => null);
-    for (const m of [...row].sort((a, b) => cx(a) - cx(b))) cells[colFor(m)] = m.id;
-    return cells;
+  // Two cells of ONE row in one column prove it is two columns (H-04-003) —
+  // splitCollidingColumns splits them; a bucket still holding 2+ cells
+  // (identical x-centres) widens its column into side-by-side slots.
+  const colCenters = splitCollidingColumns(
+    rowsArr.map((row) => row.map(cx)),
+    clusterCenters(members.map(cx), medW * 0.5),
+  );
+  const buckets: string[][][] = rowsArr.map((row) => {
+    const b: string[][] = colCenters.map(() => []);
+    for (const m of [...row].sort((a, b2) => cx(a) - cx(b2)))
+      b[nearestIndex(colCenters, cx(m))].push(m.id);
+    return b;
   });
-  return { rows: rowsArr.length, cols: colCenters.length, grid };
+  const slots = colCenters.map((_, k) => Math.max(1, ...buckets.map((b) => b[k].length)));
+  const nCols = slots.reduce((s, n) => s + n, 0);
+  const grid: (string | null)[][] = buckets.map((b) =>
+    b.flatMap((ids, k) => [...ids, ...Array.from({ length: slots[k] - ids.length }, () => null)]),
+  );
+  return { rows: rowsArr.length, cols: nCols, grid };
+}
+
+function nearestIndex(centers: number[], c: number): number {
+  let best = 0;
+  let bestD = Infinity;
+  centers.forEach((cc, i) => {
+    const d = Math.abs(c - cc);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  });
+  return best;
+}
+
+/**
+ * Split each column that holds two cells of one row: the leftmost such column
+ * with a gap between its cells' x-centres splits at its widest gap (first on
+ * ties) into the means of the two halves; repeat until none can split.
+ * Copy of grouping.ts splitCollidingColumns (pipeline_refine.py
+ * _split_colliding_columns) — keep the three in lockstep.
+ */
+function splitCollidingColumns(rowsCx: number[][], centers: number[]): number[] {
+  const out = [...centers];
+  const nCells = rowsCx.reduce((s, r) => s + r.length, 0);
+  for (let iter = 0; iter < nCells; iter++) {
+    const assigned = rowsCx.map((row) => row.map((c) => nearestIndex(out, c)));
+    let split: [number, number, number] | null = null;
+    for (let k = 0; k < out.length && !split; k++) {
+      if (!assigned.some((a) => a.filter((ak) => ak === k).length > 1)) continue;
+      const xs = rowsCx
+        .flatMap((row, r) => row.filter((_, j) => assigned[r][j] === k))
+        .sort((a, b) => a - b);
+      let gap = -Infinity;
+      let at = 0;
+      for (let j = 0; j + 1 < xs.length; j++) {
+        if (xs[j + 1] - xs[j] > gap) {
+          gap = xs[j + 1] - xs[j];
+          at = j;
+        }
+      }
+      if (gap > 0) {
+        const mean = (v: number[]) => v.reduce((s, x) => s + x, 0) / v.length;
+        split = [k, mean(xs.slice(0, at + 1)), mean(xs.slice(at + 1))];
+      }
+    }
+    if (!split) break;
+    const [k, left, right] = split;
+    out.splice(k, 1, left, right);
+  }
+  return out;
 }
 
 function median(xs: number[]): number {

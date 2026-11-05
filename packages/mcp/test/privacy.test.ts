@@ -119,6 +119,13 @@ describe("sentinel recorder over every tool", () => {
         new RegExp(`^/v1/templates/${TPL}/pdf$`),
         () => new Response(new Uint8Array(tplPdf)),
       )
+      .on("POST", /^\/v1\/forms\/acroform$/, (req) => {
+        // Only the template id: never a value.
+        expect(JSON.parse(req.body)).toEqual({ template_id: TPL });
+        return new Response(new Uint8Array(tplPdf), {
+          headers: { "content-type": "application/pdf" },
+        });
+      })
       .on("POST", new RegExp(`^/v1/templates/${TPL}/recipients$`), () =>
         json(201, { id: "r1", label: "Client", url: "https://fenfill.com/r/x", status: "pending" }),
       )
@@ -195,6 +202,10 @@ describe("sentinel recorder over every tool", () => {
       template_id: TPL,
       values,
       output_path: out2,
+    });
+    results.make_fillable = await c.call("make_fillable", {
+      template_id: TPL,
+      output_path: join(t.dir, "fillable.pdf"),
     });
     results.edit_template = await c.call("edit_template", {
       template_id: TPL,

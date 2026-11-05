@@ -29,6 +29,7 @@ import {
   textUppercaseOf,
 } from "@/types";
 
+import { autoHeightsCached } from "./autoSize";
 import type { Pct } from "./coords";
 import {
   boxPct,
@@ -77,6 +78,13 @@ export function buildMarks({
   const groupedFieldIds = new Set<string>();
   for (const g of groups) for (const id of g.members) groupedFieldIds.add(id);
   const visibleRows = (g: Group, capacity: number) => Math.min(rowCounts[g.id] ?? 1, capacity);
+  // Neighbouring Auto boxes start at one shared size (autoSize.ts); omitted when
+  // the field keeps its own box height, so its marks stay as before.
+  const sharedH = autoHeightsCached(fields, groups);
+  const autoH = (id: string): { autoHPct?: number } => {
+    const h = sharedH.get(id);
+    return h != null ? { autoHPct: h } : {};
+  };
 
   // Explicit checkbox mark size (points) as a spreadable patch — omitted (empty)
   // when unset so the null/auto render path stays byte-identical to before.
@@ -188,6 +196,7 @@ export function buildMarks({
         anchor: fieldAnchorOf(f),
         multiline: ml,
         autoFit: fieldIsAutoFontSize(f),
+        ...autoH(f.id),
       });
     }
   };
@@ -263,6 +272,8 @@ export function buildMarks({
                   anchor: fieldAnchorOf(m),
                   multiline: ml,
                   autoFit: fieldIsAutoFontSize(m),
+                  // A real row cell is its own field; a cloned row uses its column's.
+                  ...autoH(real?.id ?? m.id),
                 }),
           });
         }

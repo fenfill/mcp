@@ -150,12 +150,19 @@ export const AUTO_MIN_FONT_SIZE = 8;
 // text with proportional padding — never the flat DEFAULT_FONT_SIZE. Clamped to
 // [AUTO_MIN_FONT_SIZE, DEFAULT_FONT_SIZE]: capped so Auto is never larger than the
 // historical baseline, floored at the readability minimum (padding yields before
-// legibility does). The horizontal shrink-to-fit (fitFontSize) still applies on top.
+// legibility does). Rounded DOWN to AUTO_SIZE_STEP so boxes a hair apart in height
+// (11.92 vs 12.18 pt of text) print at one size; down, so it never outgrows the
+// box. The horizontal shrink-to-fit (fitFontSize) still applies on top.
 // Shared by every render path (live FILL, EDIT stamp, exported PDF) so on-screen
-// filling matches the exported PDF.
+// filling matches the exported PDF. Neighbouring boxes share ONE height for this
+// (autoSize.ts → Mark.autoHPct); acroform_export.py mirrors both.
+export const AUTO_SIZE_STEP = 0.5;
 export function autoTextStartPt(boxHeightPt: number): number {
   const byHeight = boxHeightPt * AUTO_HEIGHT_FILL;
-  return Math.min(DEFAULT_FONT_SIZE, Math.max(AUTO_MIN_FONT_SIZE, byHeight));
+  const clamped = Math.min(DEFAULT_FONT_SIZE, Math.max(AUTO_MIN_FONT_SIZE, byHeight));
+  // The epsilon keeps a size that is already on a step (e.g. 11.5 computed as
+  // 11.4999999) on it.
+  return Math.floor(clamped / AUTO_SIZE_STEP + 1e-9) * AUTO_SIZE_STEP;
 }
 
 // The rounded Auto start size the renderer will use for `field`, resolved against
@@ -171,9 +178,13 @@ export function autoTextStartPt(boxHeightPt: number): number {
 //   • the page is missing or has no dimensions (e.g. before a ghost page gets real
 //     dims — for a checkbox we also need the width).
 // Display-only (rounded): the render paths use the unrounded start sizes.
+//
+// `autoHPct`: the height (percent of the page) the field shares with its
+// neighbours (autoSize.ts autoHeights), when it is in such a cluster.
 export function autoStartForField(
   field: Pick<Field, "type" | "format" | "page" | "hpct" | "wpct">,
   pages: readonly PageInfo[],
+  autoHPct?: number,
 ): number | null {
   const heightBased = field.type === "date" || (field.type === "text" && !textMultilineOf(field));
   const isCheckbox = field.type === "checkbox";
@@ -188,7 +199,7 @@ export function autoStartForField(
     const boxWidthPt = (field.wpct / 100) * pageWidthPt;
     return Math.round(Math.min(boxHeightPt, boxWidthPt) * CHECKBOX_AUTO_FILL);
   }
-  return Math.round(autoTextStartPt(boxHeightPt));
+  return Math.round(autoTextStartPt(((autoHPct ?? field.hpct) / 100) * pageHeightPt));
 }
 
 // ─── Multi-line wrapping + vertical auto-shrink ─────────────────────────────────

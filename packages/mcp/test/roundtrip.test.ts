@@ -20,12 +20,12 @@ afterEach(async () => {
 });
 
 describe("InMemoryTransport round trip", () => {
-  it("lists exactly the twelve tools, with annotations and no outputSchema", async () => {
+  it("lists exactly the thirteen tools, with annotations and no outputSchema", async () => {
     c = await connect({ env: env(join(t.dir, "cache")), fetchImpl: new MockApi().fetch });
     const { tools } = await c.client.listTools();
     expect(tools.map((x) => x.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(tools).toHaveLength(12);
-    expect(tools.map((x) => x.name)).not.toContain("make_fillable");
+    expect(tools).toHaveLength(13);
+    expect(tools.map((x) => x.name)).toContain("make_fillable");
     for (const tool of tools) {
       expect(tool.description, tool.name).toBeTruthy();
       // fill_form / fill_template carry the value-format guide (VALUE_SHAPES).
@@ -75,6 +75,21 @@ describe("InMemoryTransport round trip", () => {
       expect(re).toMatch(must);
     }
     expect(byName.reanalyze_template.inputSchema.properties).toHaveProperty("kind");
+    const mf = byName.make_fillable;
+    expect(mf.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
+    expect(Object.keys(mf.inputSchema.properties ?? {}).sort()).toEqual([
+      "output_path",
+      "overwrite",
+      "template_id",
+    ]);
+    expect(mf.description).toMatch(/Team plan or above/);
+    expect(mf.description).toMatch(/never sends any/);
+    expect(mf.description).not.toMatch(/adobe|acrobat|\bfree\b/i);
     expect(c.client.getServerVersion()?.name).toBe("fenfill");
     expect(c.client.getInstructions()).toMatch(/never leave this machine/);
   });

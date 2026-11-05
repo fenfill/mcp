@@ -126,13 +126,14 @@ const HINTS: Record<string, string> = {
 
 /** What a request was about, for hints that depend on it (a 404 on a job poll
  *  is not a missing template). */
-export type ErrorContext = "job" | "template" | "reanalyze" | "other";
+export type ErrorContext = "job" | "template" | "reanalyze" | "fillable" | "other";
 
 /** The context of a /v1 path. */
 export function contextOf(path: string): ErrorContext {
   if (path.startsWith("/jobs/")) return "job";
   if (/^\/templates\/[^/?]+\/analyze$/.test(path)) return "reanalyze";
   if (path.startsWith("/templates")) return "template";
+  if (path === "/forms/acroform") return "fillable";
   return "other";
 }
 
@@ -156,6 +157,16 @@ function hintFor(
       const need = typeof body.need === "number" ? body.need : "?";
       const have = typeof body.have === "number" ? body.have : "?";
       return `This re-analysis needs ${String(need)} page scans and ${String(have)} are left. Re-analyze fewer pages, or add scans in fenfill (Settings → Billing). estimate: true prices it first.`;
+    }
+  }
+  if (context === "fillable") {
+    if (code === "plan_required") {
+      return "A fillable PDF needs the Team plan or above. Upgrade in fenfill (Settings → Billing); fill_template still fills this template on this machine on any plan.";
+    }
+    if (code === "not_found")
+      return "Check the id. list_templates shows the workspace's template ids.";
+    if (code === "invalid_schema" || code === "template_needs_migration") {
+      return "fenfill can't turn this template's layout into form fields as stored. Fix the layout in the fenfill web editor (or with edit_template + save_template), then retry; fill_template still works.";
     }
   }
   if (code === "template_frozen" && context === "job") {
@@ -300,6 +311,21 @@ export class FenfillApi {
 
   /** A GET with the retry policy; resolves only on a 2xx. */
   private async get(path: string, accept: string, opts: GetOptions = {}): Promise<Response> {
+    return this.retrying("GET", path, accept, undefined, opts);
+  }
+
+  /**
+   * A request with the GET retry policy (429 / 503 waited out within the
+   * deadline); resolves only on a 2xx. Only for requests that are safe to
+   * repeat: a GET, or a POST that creates nothing (postBytes).
+   */
+  private async retrying(
+    method: "GET" | "POST",
+    path: string,
+    accept: string,
+    jsonBody: unknown,
+    opts: GetOptions,
+  ): Promise<Response> {
     const deadline = opts.deadline ?? this.now() + DEFAULT_GET_BUDGET_MS;
     for (let attempt = 0; ; attempt++) {
       const timeout = AbortSignal.timeout(GET_TIMEOUT_MS);
@@ -307,8 +333,13 @@ export class FenfillApi {
       let res: Response;
       try {
         res = await this.doFetch(this.url(path), {
-          method: "GET",
-          headers: this.headers({ Accept: accept }),
+          method,
+          headers: this.headers(
+            method === "POST"
+              ? { Accept: accept, "Content-Type": "application/json" }
+              : { Accept: accept },
+          ),
+          ...(method === "POST" ? { body: JSON.stringify(jsonBody) } : {}),
           signal,
           redirect: "error",
         });
@@ -353,6 +384,25 @@ export class FenfillApi {
       throw e;
     }
     return new Uint8Array(await res.arrayBuffer());
+  }
+
+  /**
+   * A JSON POST that answers with bytes (POST /forms/acroform). It creates
+   * nothing server-side, so it takes the GET retry policy and the same error
+   * mapping.
+   */
+  async postBytes(path: string, body: unknown, opts: GetOptions = {}): Promise<Uint8Array> {
+    return (await this.postBytesWithHeaders(path, body, opts)).bytes;
+  }
+
+  /** postBytes plus the response headers (make_fillable reads X-Fenfill-Skipped-Fields). */
+  async postBytesWithHeaders(
+    path: string,
+    body: unknown,
+    opts: GetOptions = {},
+  ): Promise<{ bytes: Uint8Array; headers: Headers }> {
+    const res = await this.retrying("POST", path, "application/pdf", body, opts);
+    return { bytes: new Uint8Array(await res.arrayBuffer()), headers: res.headers };
   }
 
   /** A JSON POST, sent exactly once (never retried). */
