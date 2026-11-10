@@ -27,7 +27,8 @@ import {
 } from "@/app/t/[template_id]/fillCore";
 import { buildPageItems } from "@/app/t/[template_id]/pageLayout";
 import { boxEdges, type Edges, membersEdges, orderBlocks } from "@/app/t/[template_id]/readOrder";
-import { AUTOFILL_TOKENS, DATE_FORMATS } from "@/types";
+import { dateFormatFromLabel } from "@/lib/dateFormatHint";
+import { AUTOFILL_TOKENS, DATE_FORMATS, SPLIT_FLOW_MIN_MEMBERS } from "@/types";
 
 import {
   bad,
@@ -348,7 +349,10 @@ function typeAndFormat(
       return {
         type: "date",
         format: {
-          date_format: typeof prevFmt.date_format === "string" ? prevFmt.date_format : "DD/MM/YYYY",
+          date_format:
+            typeof prevFmt.date_format === "string"
+              ? prevFmt.date_format
+              : (dateFormatFromLabel(prev?.label) ?? DATE_FORMATS[0]),
           ...keep(["font_size", "text_anchor"]),
         },
       };
@@ -375,6 +379,9 @@ function entryType(d: Doc, id: string): string {
   if (g) {
     if (g.kind === "choice") return g.format === "multiple" ? "multiselect" : "radio";
     if (g.kind === "table") return g.format === "expandable" ? "table_rows" : "table";
+    // A parts split is one amount (agent type number), a flow split one text.
+    if (g.kind === "split" && g.rule === "parts") return "number";
+    if (g.kind === "split" && g.rule === "flow") return "text";
     return String(g.kind);
   }
   const f = d.field.get(id);
@@ -607,6 +614,18 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
         for (const m of members(d, g)) gone.add(m.id);
         removeGroup(d, g);
       } else gone.add((f as Field).id);
+      // A split's boxes carry one value between them: a parts split keeps both,
+      // a flow split at least two (SPLIT_FLOW_MIN_MEMBERS).
+      for (const og of d.s.groups as Group[]) {
+        if (og === g || og.kind !== "split" || !Array.isArray(og.members)) continue;
+        const ids = og.members as string[];
+        const left = ids.filter((m) => !gone.has(m)).length;
+        if (left === ids.length) continue;
+        if (og.rule === "parts" || left < SPLIT_FLOW_MIN_MEMBERS)
+          return bad(
+            `${(f as Field | undefined)?.id ?? op.id} is a box of split ${og.id}, which needs ${og.rule === "parts" ? "both its boxes" : `at least ${String(SPLIT_FLOW_MIN_MEMBERS)} boxes`}: delete or ungroup the split instead`,
+          );
+      }
       // A deleted option/cell leaves its group; a group left empty goes too.
       const reshaped: string[] = [];
       for (const og of [...d.s.groups] as Group[]) {
@@ -659,11 +678,12 @@ function applyOne(d: Doc, op: Op, warnings: string[], opts: ApplyOptions): OneRe
         if (v === null) delete next[k];
         else next[k] = v;
       }
-      // A date field stored without a format prints in DATE_FORMATS[0]; a
-      // partial format (just font_size) keeps that, since the server's date
-      // format requires date_format.
+      // A date field stored without a format prints its label's hint, else
+      // DATE_FORMATS[0] (as types.ts dateFormatOf reads it); a partial format (just
+      // font_size) keeps that, since the server's date format requires
+      // date_format.
       if (fld.type === "date" && next.date_format === undefined && Object.keys(next).length > 0)
-        next.date_format = DATE_FORMATS[0];
+        next.date_format = dateFormatFromLabel(fld.label) ?? DATE_FORMATS[0];
       const issues = formatIssues(fld.type, next, fld.id, "format");
       if (issues.length) return bad(issues.map((i) => `${i.path} ${i.reason}`).join("; "));
       if (Object.keys(next).length === 0 && (fld.type === "signature" || fld.type === "date"))
@@ -1356,9 +1376,9 @@ function retypeComb(
   ) {
     // The field's printed date format, its separators dropped (DD/MM/YYYY → DDMMYYYY).
     const printed =
-      isRec(f.format) && typeof f.format.date_format === "string"
+      isRec(f.format) && typeof f.format.date_format === "string" && f.format.date_format
         ? f.format.date_format
-        : DATE_FORMATS[0];
+        : (dateFormatFromLabel(f.label) ?? DATE_FORMATS[0]);
     const letters = printed.replace(/[^DMY]/g, "");
     if (letters.length === boxes.length) dateFormat = letters;
     else

@@ -118,7 +118,7 @@ function templateMock(
     .on("GET", /^\/v1\/account$/, () =>
       json(200, {
         workspace_id: "ws-1",
-        tier: "team",
+        tier: "pro",
         scans_remaining: 5,
         max_pages: 100,
         max_pages_per_job: 60,
@@ -1216,7 +1216,7 @@ describe("where an entry was named", () => {
       .on("GET", /^\/v1\/account$/, () =>
         json(200, {
           workspace_id: "ws-1",
-          tier: "team",
+          tier: "pro",
           scans_remaining: 5,
           max_pages: 100,
           max_pages_per_job: 60,
@@ -1711,7 +1711,7 @@ describe("make_fillable", () => {
     expect(r.isError).toBe(true);
     expect(r.data.error).toMatchObject({ code: "plan_required" });
     const text = JSON.stringify(r.data.error);
-    expect(text).toMatch(/Team plan or above/);
+    expect(text).toMatch(/Pro plan or above/);
     expect(text).toMatch(/fill_template/);
     expect(walk(t.dir).filter((p) => p.endsWith(".pdf"))).toEqual([]);
   });
@@ -1761,5 +1761,61 @@ describe("make_fillable", () => {
     });
     expect(r.data.error).toMatchObject({ code: "bad_response" });
     expect(walk(t.dir).filter((p) => p.endsWith(".pdf"))).toEqual([]);
+  });
+});
+
+describe("create_recipient_link expiry (F4-a)", () => {
+  const created = () =>
+    new MockApi().on("POST", /^\/v1\/templates\/[^/]+\/recipients$/, () =>
+      Response.json(
+        { id: "r1", label: "Anna", url: "https://x", status: "pending" },
+        { status: 201 },
+      ),
+    );
+  const sent = (mock: MockApi) =>
+    mock.calls.filter((x) => x.method === "POST").map((x) => JSON.parse(String(x.body)) as unknown);
+
+  it("sends expires_at null when none is given (the API makes that 30 days)", async () => {
+    const mock = created();
+    const c = await server(mock);
+    await c.call("create_recipient_link", { template_id: TPL, label: "Anna" });
+    expect(sent(mock)).toEqual([{ label: "Anna", expires_at: null }]);
+  });
+
+  it("passes no_expiry through only when true", async () => {
+    const mock = created();
+    const c = await server(mock);
+    await c.call("create_recipient_link", { template_id: TPL, label: "Anna", no_expiry: true });
+    await c.call("create_recipient_link", { template_id: TPL, label: "Anna", no_expiry: false });
+    expect(sent(mock)).toEqual([
+      { label: "Anna", expires_at: null, no_expiry: true },
+      { label: "Anna", expires_at: null },
+    ]);
+  });
+});
+
+describe("create_recipient_link plan refusals", () => {
+  it("plan_required names Business and says reading status still works", async () => {
+    const mock = new MockApi().on("POST", /^\/v1\/templates\/[^/]+\/recipients$/, () =>
+      apiError(403, "plan_required"),
+    );
+    const c = await server(mock);
+    const r = await c.call("create_recipient_link", { template_id: TPL, label: "Anna" });
+    expect(r.isError).toBe(true);
+    expect(r.data.error).toMatchObject({ code: "plan_required" });
+    const text = JSON.stringify(r.data.error);
+    expect(text).toMatch(/needs the Business plan/);
+    expect(text).toMatch(/Reading recipients and status works on any plan with API access/);
+  });
+
+  it("private_link_limit explains the monthly reset", async () => {
+    const mock = new MockApi().on("POST", /^\/v1\/templates\/[^/]+\/recipients$/, () =>
+      apiError(409, "private_link_limit"),
+    );
+    const c = await server(mock);
+    const r = await c.call("create_recipient_link", { template_id: TPL, label: "Anna" });
+    expect(r.isError).toBe(true);
+    expect(r.data.error).toMatchObject({ code: "private_link_limit" });
+    expect(JSON.stringify(r.data.error)).toMatch(/resets on the first of the month/);
   });
 });

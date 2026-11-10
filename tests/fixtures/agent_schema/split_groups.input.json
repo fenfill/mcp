@@ -1,0 +1,284 @@
+{
+  "version": 5,
+  "pages": [
+    {
+      "page": 1,
+      "width": 1240,
+      "height": 1754,
+      "image": "https://example.supabase.co/storage/v1/object/public/previews/job/p1.webp",
+      "sections": []
+    }
+  ],
+  "fields": [
+    {
+      "id": "f-name",
+      "label": "Full name",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 10,
+      "wpct": 40,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      }
+    },
+    {
+      "id": "f-inc-zl",
+      "label": "Income zl",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 20,
+      "wpct": 12,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "g-income",
+      "autofill": "transaction-amount"
+    },
+    {
+      "id": "f-inc-gr",
+      "label": "Income gr",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 23,
+      "ypct": 20,
+      "wpct": 4,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "g-income"
+    },
+    {
+      "id": "f-tax-zl",
+      "label": "Tax due zl",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 40,
+      "ypct": 20,
+      "wpct": 12,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "g-tax"
+    },
+    {
+      "id": "f-tax-gr",
+      "label": "",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 53,
+      "ypct": 20,
+      "wpct": 4,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "g-tax"
+    },
+    {
+      "id": "f-addr-1",
+      "label": "",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 30,
+      "wpct": 60,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "g-addr",
+      "autofill": "street-address"
+    },
+    {
+      "id": "f-addr-2",
+      "label": "",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 34,
+      "wpct": 60,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "g-addr"
+    },
+    {
+      "id": "f-addr-3",
+      "label": "",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 38,
+      "wpct": 60,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "g-addr"
+    },
+    {
+      "id": "f-loss-zl",
+      "label": "Loss zl",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 50,
+      "wpct": 12,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "number"
+      },
+      "group": "g-loss"
+    },
+    {
+      "id": "f-fn-1",
+      "label": "First names",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 60,
+      "wpct": 45,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "g-fn",
+      "autofill": "given-name"
+    },
+    {
+      "id": "f-fn-2",
+      "label": "",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 64,
+      "wpct": 45,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "g-fn",
+      "required": true
+    },
+    {
+      "id": "f-city",
+      "label": "City",
+      "type": "text",
+      "page": 1,
+      "section_id": null,
+      "xpct": 10,
+      "ypct": 70,
+      "wpct": 45,
+      "hpct": 3,
+      "cells": [],
+      "format": {
+        "variant": "any"
+      },
+      "group": "g-city"
+    }
+  ],
+  "groups": [
+    {
+      "id": "g-income",
+      "kind": "split",
+      "rule": "parts",
+      "value_type": "number",
+      "label": "Income (PLN)",
+      "page": 1,
+      "members": [
+        "f-inc-zl",
+        "f-inc-gr"
+      ],
+      "required": true,
+      "description": "Total income for the year"
+    },
+    {
+      "id": "g-tax",
+      "kind": "split",
+      "rule": "parts",
+      "frac_digits": 0,
+      "pad_frac": false,
+      "label": "",
+      "page": 1,
+      "members": [
+        "f-tax-zl",
+        "f-tax-gr"
+      ]
+    },
+    {
+      "id": "g-addr",
+      "kind": "split",
+      "rule": "flow",
+      "label": "Home address",
+      "page": 1,
+      "members": [
+        "f-addr-1",
+        "f-addr-2",
+        "f-addr-3"
+      ]
+    },
+    {
+      "id": "g-loss",
+      "kind": "split",
+      "rule": "parts",
+      "label": "Loss",
+      "page": 1,
+      "members": [
+        "f-loss-zl",
+        "f-loss-gone"
+      ]
+    },
+    {
+      "id": "g-fn",
+      "kind": "split",
+      "rule": "flow",
+      "value_type": "text",
+      "label": "",
+      "page": 1,
+      "members": [
+        "f-fn-1",
+        "f-fn-2"
+      ]
+    },
+    {
+      "id": "g-city",
+      "kind": "split",
+      "rule": "flow",
+      "label": "Town",
+      "page": 1,
+      "members": [
+        "f-city",
+        "f-city-gone"
+      ]
+    }
+  ]
+}

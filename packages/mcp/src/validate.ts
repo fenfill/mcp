@@ -36,7 +36,11 @@ export const TEXT_ANCHORS = [
   "bottom-right",
 ];
 const SHAPES = ["square", "round"];
-const GROUP_KINDS = ["comb", "choice", "table"];
+const GROUP_KINDS = ["comb", "choice", "table", "split"];
+const SPLIT_RULES = ["parts", "flow"];
+const SPLIT_ATTRS = ["rule", "value_type", "frac_digits", "pad_frac"] as const;
+const SPLIT_FRAC_DIGITS_MAX = 4;
+const SPLIT_FLOW_MIN_MEMBERS = 2;
 const CHOICE_FORMATS = ["single", "multiple"];
 const TABLE_FORMATS = ["classic", "expandable", "checkbox_matrix"];
 
@@ -80,6 +84,10 @@ const GROUP_KEYS = new Set([
   "description",
   "placeholder",
   "required",
+  "rule",
+  "value_type",
+  "frac_digits",
+  "pad_frac",
 ]);
 const SECTION_KEYS = new Set(["id", "title", "description", "placeholder", "required"]);
 const TOP_KEYS = new Set(["version", "pages", "fields", "groups"]);
@@ -242,10 +250,18 @@ export function groupIssues(g: unknown, path: string): Issue[] {
   checkStr(out, g.label, MAX_LABEL, at("label"), false);
   if (!GROUP_KINDS.includes(g.kind as string)) {
     out.push({ ...at("kind"), reason: `must be one of ${GROUP_KINDS.join(", ")}` });
+  } else if (g.kind === "split") {
+    out.push(...splitAttrIssues(g, at));
   } else if (g.format !== undefined && g.format !== null && g.kind !== "comb") {
     const ok = g.kind === "choice" ? CHOICE_FORMATS : TABLE_FORMATS;
     if (!ok.includes(g.format as string)) {
       out.push({ ...at("format"), reason: `must be one of ${ok.join(", ")}` });
+    }
+  }
+  if (g.kind !== "split") {
+    for (const k of SPLIT_ATTRS) {
+      if (g[k] !== undefined && g[k] !== null)
+        out.push({ ...at(k), reason: "is only for a split group" });
     }
   }
   if (!isInt(g.page)) out.push({ ...at("page"), reason: "must be an integer" });
@@ -289,6 +305,66 @@ export function groupIssues(g: unknown, path: string): Issue[] {
   checkStr(out, g.placeholder, MAX_TEXT, at("placeholder"), true);
   if (g.required !== undefined && g.required !== null && typeof g.required !== "boolean")
     out.push({ ...at("required"), reason: "must be true or false" });
+  return out;
+}
+
+/** A split group's own attributes (schemas.py Group._check_split_attrs). */
+function splitAttrIssues(
+  g: Record<string, unknown>,
+  at: (k: string) => { id?: string; path: string },
+): Issue[] {
+  const out: Issue[] = [];
+  const rule = g.rule;
+  if (rule === undefined || rule === null || !SPLIT_RULES.includes(rule as string)) {
+    out.push({ ...at("rule"), reason: "a split group needs a rule: parts or flow" });
+    return out;
+  }
+  if (g.format !== undefined && g.format !== null)
+    out.push({ ...at("format"), reason: "a split group has no format" });
+  const want = rule === "parts" ? "number" : "text";
+  if (g.value_type !== undefined && g.value_type !== null && g.value_type !== want)
+    out.push({ ...at("value_type"), reason: `must be ${want} for a ${rule} split` });
+  const n = Array.isArray(g.members) ? g.members.length : 0;
+  if (rule === "parts") {
+    if (n !== 2) out.push({ ...at("members"), reason: "a parts split has exactly 2 members" });
+    const d = g.frac_digits;
+    if (d !== undefined && d !== null && (!isInt(d) || d < 0 || d > SPLIT_FRAC_DIGITS_MAX))
+      out.push({ ...at("frac_digits"), reason: `must be 0–${String(SPLIT_FRAC_DIGITS_MAX)}` });
+    if (g.pad_frac !== undefined && g.pad_frac !== null && typeof g.pad_frac !== "boolean")
+      out.push({ ...at("pad_frac"), reason: "must be true or false" });
+  } else {
+    if (n < SPLIT_FLOW_MIN_MEMBERS)
+      out.push({
+        ...at("members"),
+        reason: `a flow split has at least ${String(SPLIT_FLOW_MIN_MEMBERS)} members`,
+      });
+    for (const k of ["frac_digits", "pad_frac"]) {
+      if (g[k] !== undefined && g[k] !== null)
+        out.push({ ...at(k), reason: "is only for a parts split" });
+    }
+  }
+  return out;
+}
+
+/** Split members that are not text fields on the group's page (schemas.py split_member_issues). */
+export function splitMemberIssues(schema: RenderSchema): Issue[] {
+  const out: Issue[] = [];
+  const byId = new Map(schema.fields.map((f) => [f.id, f] as const));
+  schema.groups.forEach((g, gi) => {
+    if (g.kind !== "split" || !Array.isArray(g.members)) return;
+    (g.members as unknown[]).forEach((m, mi) => {
+      const f = typeof m === "string" ? byId.get(m) : undefined;
+      if (!f) return;
+      const reason =
+        f.type !== "text"
+          ? "a split member must be a text field"
+          : f.page !== g.page
+            ? "a split member must be on the group's page"
+            : null;
+      if (reason)
+        out.push({ id: g.id, path: `groups.${String(gi)}.members.${String(mi)}`, reason });
+    });
+  });
   return out;
 }
 
@@ -347,6 +423,7 @@ export function schemaIssues(schema: RenderSchema, limit = 50): Issue[] {
   fields.forEach((f, i) => out.push(...fieldIssues(f, `fields.${String(i)}`)));
   groups.forEach((g, i) => out.push(...groupIssues(g, `groups.${String(i)}`)));
   out.push(...referenceIssues(schema));
+  out.push(...splitMemberIssues(schema));
   return out.slice(0, limit);
 }
 

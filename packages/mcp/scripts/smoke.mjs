@@ -1,7 +1,7 @@
 // Bundle smoke: runs the BUILT server (dist/, copied outside the repo so no
 // node_modules can leak in) over real stdio with the SDK's StdioClientTransport,
 // and fills a plain and an owner-password-encrypted PDF fully offline from a
-// pre-seeded cache. Asserts: exactly the 13 tools; the outputs are stamped and
+// pre-seeded cache. Asserts: exactly the 14 tools; the outputs are stamped and
 // tagged; preview_page renders a PNG with the bundled pdfium.wasm, offline;
 // edit_template works offline on an unsaved analysis; stdout carried nothing
 // but JSON-RPC (also checked on a raw spawn).
@@ -47,6 +47,7 @@ const EXPECTED_TOOLS = [
   "get_account",
   "get_recipient_status",
   "get_template",
+  "list_sample_forms",
   "list_templates",
   "make_fillable",
   "preview_page",

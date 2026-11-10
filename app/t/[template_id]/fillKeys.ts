@@ -25,11 +25,27 @@ export function buildFieldById(fields: readonly Field[]): Map<string, Field> {
 // f{id}            ungrouped field / group member / single comb cell
 // c{gid}           choice group selection (single id, or MULTI_SEP-joined ids)
 // e{gid}.{r}.{fid} a cloned (added) row cell of an expandable group
+// s{gid}           a flow split's whole text (the member boxes' strings are
+//                  derived from it when marks are built, never stored)
 // f{id}#{i}        character i of a multi-cell (comb) field
 export const fieldKey = (id: string) => `f${id}`;
 export const choiceKey = (groupId: string) => `c${groupId}`;
+export const flowKey = (groupId: string) => `s${groupId}`;
 export const expKey = (groupId: string, row: number, fieldId: string) =>
   `e${groupId}.${row}.${fieldId}`;
+
+// The value keys that say whether a flow split is answered, by what buildMarks
+// prints: its flow value when the store holds one (even ""), else its boxes'
+// own values (filled box by box: an old MCP client's demoted copy, or before
+// the one-input UI). A flow is one answer however many keys back it.
+export function flowAnswerKeys(
+  groupId: string,
+  members: readonly Pick<Field, "id">[],
+  values: Readonly<Record<string, string | undefined>>,
+): string[] {
+  const k = flowKey(groupId);
+  return Object.hasOwn(values, k) ? [k] : members.map((m) => fieldKey(m.id));
+}
 
 // Multi-select choice values are stored joined by this control char (U+0001,
 // Start of Heading) — a byte that never appears in a member id.
@@ -39,6 +55,13 @@ export const splitMulti = (v: string | undefined) => (v ?? "").split(MULTI_SEP).
 // Combs longer than this render as a single textbox on the digital pane instead
 // of a row of OTP boxes (still char-limited); the paperform pane keeps the cells.
 export const COMB_INLINE_MAX = 8;
+// Phones (a Story card, MOBILE_FILL Wave B): the cells share one non-wrapping
+// row. At a 360px viewport the card's content box is 288px (16px page gutter +
+// 20px card padding each side); 6 cells with 4px gaps get (288 - 20) / 6 ≈ 44px
+// each — a thumb-sized target, well above the ~28px legibility floor — and stay
+// ≥ 42px with one 12px segment gap. A 7th cell would drop them below 40px, so
+// longer combs collapse to the one-line input there.
+export const COMB_INLINE_MAX_PHONE = 6;
 
 // A box as percent of the page (top-left origin) — the v2 coordinate space.
 export const boxPct = (b: { xpct: number; ypct: number; wpct: number; hpct: number }): Pct => ({

@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.2.8
+
+### Added
+
+- Split answers. Some forms print one answer across several boxes: an amount as whole units and
+  cents (`zł | gr`), or an address that runs on over two or three lines. fenfill now marks these
+  as one split group, and an agent gives **one value** for the group: a number (`1234,56`,
+  `1 234.56`, `1234`) for an amount, one text for continued lines. The MCP puts the whole and
+  the fraction in their boxes, and breaks long text into the lines exactly as the web app does.
+  A value that can't go in (a negative amount, too many decimals) comes back in `skipped` with
+  the reason; text too long for the lines comes back with a warning. Deleting one box of a split
+  is refused: delete or ungroup the split instead. Older versions don't know split groups:
+  update to this version to fill templates that have them.
+- A date field whose label shows its format, like "Date of birth (MM/DD/YYYY)" or
+  "Data urodzenia (DD.MM.RRRR)", is filled in that format.
+- Test keys (`ff_test_…`): they work on every plan, with fenfill's sample forms only, so you can
+  build the whole flow before you pay; go live with a live key (`ff_live_…`) on Pro or Business.
+  Fills made with a test key carry a TEST mark on every page. See "Test keys" in the README.
+- `list_sample_forms`: lists fenfill's sample forms with their `pdf_url` and `sha256` (any key).
+  A test key's `analyze_form` takes only these files, unchanged.
+- `list_sample_forms` with `download` (a sample's `slug`) saves that sample's PDF in the cache,
+  checked against its `sha256`, and returns its `path` for `analyze_form`, so an agent whose
+  client can't download files (Claude Desktop) can try a test key too.
+- `analyze_form` with a test key: a sample form comes back at once (`mode: "sample"`, `cost: 0`),
+  with no waiting. `estimate: true` uses no page scans and shows the file's `sha256`.
+- With a test key, the tool descriptions and `get_account` (`test_mode_note`) say so, so the
+  agent can tell you. A live key's descriptions are unchanged.
+- Hints for the test-key refusals: `test_mode_sample_only`, `test_mode_no_links` and
+  `test_mode_not_available`.
+- `create_recipient_link` with `no_expiry: true` makes a link that never expires.
+
+### Changed
+
+- `create_recipient_link` without `expires_at`: the link now expires in 30 days (it used to never
+  expire). The API applies this to every client version.
+- Plans: the API and `make_fillable` are on Pro and up. Creating and revoking client
+  links through the API needs the Business plan. Reading recipients and status works on any plan
+  with API access. `create_recipient_link` explains a `plan_required` refusal, and the new
+  `private_link_limit` error (the plan's monthly client links are used up) has a hint.
+- Tool descriptions and error hints say "client link" (one link per person, with status) and
+  "share link" (one link per form), matching the fenfill app. Tool and parameter names are
+  unchanged.
+- `make_fillable`: a template with too many fields for one fillable PDF (in all, on one page, or
+  an expandable table with very many rows) is refused with the new `export_too_large` error, which
+  has a hint. When fenfill is busy with other exports it answers `rate_limited`, as before.
+- Test and live keys of one workspace keep their templates and jobs apart in the local cache too:
+  a template saved with one is never shown to the other.
+
 ## 0.2.7
 
 ### Added

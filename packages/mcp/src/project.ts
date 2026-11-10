@@ -71,6 +71,16 @@ function entryOf(e: Core, page: number, section: AgentEntry["section"]): AgentEn
       }));
       base.max_rows = e.maxRows;
       return base;
+    case "split":
+      // D3: label and autofill fall back to / live on members[0]. A parts
+      // split is a number entry over [int, frac]; a flow split a text entry
+      // (one string wrapped over its boxes).
+      base.label = e.label;
+      base.autofill = optStr((e.rule === "flow" ? e.boxes : e.parts)[0].autofill);
+      base.kind = "split";
+      base.rule = e.rule;
+      if (e.rule === "parts") base.frac_digits = e.fracDigits;
+      return base;
     case "table": {
       const g = e.group as Group & { header_cols?: unknown; header_rows?: unknown };
       const heads = (v: unknown) => (Array.isArray(v) ? v.map((h) => str(h)) : []);
@@ -98,7 +108,10 @@ export function projectAgentSchema(
   const schema = normalizeSchema(render as Parameters<typeof normalizeSchema>[0]);
   const byId = new Map(agentEntries(schema).map((e) => [e.id, e]));
   const fieldById = buildFieldById(schema.fields);
-  const grouped = new Set(schema.groups.flatMap((g) => g.members));
+  // agent_schema.py `_claims_members`: a split that is not one entry (a
+  // malformed parts or flow) gives its boxes back as loose fields.
+  const claiming = schema.groups.filter((g) => g.kind !== "split" || byId.has(g.id));
+  const grouped = new Set(claiming.flatMap((g) => g.members));
   const fields: AgentEntry[] = [];
   const pages: AgentSchema["pages"] = [];
   const seen = new Set<number>();
@@ -109,7 +122,7 @@ export function projectAgentSchema(
     const { items } = buildPageItems(
       p,
       schema.fields.filter((f) => f.page === p.page && !grouped.has(f.id)),
-      schema.groups.filter((g) => g.page === p.page),
+      claiming.filter((g) => g.page === p.page),
       (g) => resolveMembers(g, fieldById),
     );
     let section: AgentEntry["section"] = null;

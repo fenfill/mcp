@@ -117,6 +117,11 @@ export interface StampOptions {
   // warnings). Observes only: the stamped bytes are the same with or without
   // it. The browser never passes it.
   onPlacement?: (p: Placement) => void;
+  // The API test-key mark (drawTestMark) across every page, on top of
+  // everything else. Only the MCP passes it, for a fill made with an
+  // `ff_test_` key; absent or false => nothing extra is embedded or drawn, so
+  // the output is byte for byte what it was.
+  testMark?: boolean;
 }
 
 /** How one text mark was laid out in its box (StampOptions.onPlacement). */
@@ -360,6 +365,63 @@ export function visibleFrames(pdfLib: typeof PdfLibModule): {
   return { frameOf, close };
 }
 
+/** The API test-key mark's text: U+00B7 is WinAnsi 0xB7 in Helvetica-Bold. */
+export const TEST_MARK_TEXT = "TEST · fenfill test key";
+const TEST_MARK_DIAGONAL_FRACTION = 0.6;
+const TEST_MARK_MIN_PT = 24;
+const TEST_MARK_MAX_PT = 120;
+// Helvetica-Bold's CapHeight (AFM 718/1000).
+const TEST_MARK_CAP_HEIGHT = 0.718;
+const TEST_MARK_OPACITY = 0.18;
+
+/**
+ * The API test-key mark (StampOptions.testMark) on one page. The server draws
+ * the same mark on its fillable-PDF export (acroform_export.py
+ * `_draw_test_mark` and its TEST_MARK_* constants): keep the two in lockstep.
+ *
+ * `TEST_MARK_TEXT` in Helvetica-Bold, as page content (no annotation, no
+ * field), in the page's VISIBLE frame (`frame`: the visibleFrames matrix is
+ * already open on `page`, so it reads like the page on a /Rotate page and
+ * sits on the cropped area): centred on the frame along its bottom-left →
+ * top-right diagonal, at angle θ = atan2(H, W). Its size makes the text's
+ * advance 0.6 of the diagonal, clamped to 24..120 pt. The baseline starts at
+ * centre − u·(advance/2) − n·(cap height/2), u = (cos θ, sin θ) along the
+ * diagonal and n = (−sin θ, cos θ) square to it (y up), so the capitals sit
+ * centred on the diagonal. Fill rgb(0.85, 0.12, 0.12) at opacity 0.18. The
+ * rotation goes in the text matrix (`Tm` inside BT … ET), never a `cm` there.
+ */
+function drawTestMark(
+  pdfLib: typeof PdfLibModule,
+  page: PDFPage,
+  frame: Pick<PageFrame, "width" | "height">,
+  font: PDFFont,
+): void {
+  const { width: w, height: h } = frame;
+  if (!(w > 0 && h > 0)) return;
+  // The advance width at 1 pt, as drawn (a plain Tj: no kerning) and as the
+  // server's fitz text_length measures it: the AFM sum (10.059). Summed per
+  // character because pdf-lib's whole-string width subtracts kerning pairs.
+  const em = Array.from(TEST_MARK_TEXT).reduce((s, ch) => s + font.widthOfTextAtSize(ch, 1), 0);
+  const angle = Math.atan2(h, w);
+  const size = Math.min(
+    TEST_MARK_MAX_PT,
+    Math.max(TEST_MARK_MIN_PT, (TEST_MARK_DIAGONAL_FRACTION * Math.hypot(w, h)) / em),
+  );
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const half = (em * size) / 2;
+  const below = (TEST_MARK_CAP_HEIGHT * size) / 2;
+  page.drawText(TEST_MARK_TEXT, {
+    x: w / 2 - cos * half + sin * below,
+    y: h / 2 - sin * half - cos * below,
+    size,
+    font,
+    rotate: pdfLib.radians(angle),
+    color: pdfLib.rgb(0.85, 0.12, 0.12),
+    opacity: TEST_MARK_OPACITY,
+  });
+}
+
 /**
  * Loads the source PDF, stamps the marks plus the branding/PLG watermark and the
  * workspace logo, and returns the saved bytes. Throws on font-fetch failure; the
@@ -374,6 +436,7 @@ export async function stampPdf({
   logoBytes = null,
   infoTags,
   onPlacement,
+  testMark = false,
 }: StampOptions): Promise<Uint8Array> {
   // pdf-lib (+ fontkit) ~150KB is only needed when the user actually downloads,
   // so it's loaded here instead of at the editor/quickfill module top level.
@@ -738,6 +801,13 @@ export async function stampPdf({
     } catch {
       // ignore — logo is decorative
     }
+  }
+
+  // API test key (the MCP only): the TEST mark across every page, over the
+  // values and the marks above. Helvetica-Bold is built into pdf-lib.
+  if (testMark) {
+    const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    for (const page of pdfPages) drawTestMark(pdfLib, page, frames.frameOf(page), bold);
   }
 
   frames.close();

@@ -24,6 +24,10 @@
 //  - a pending job is dropped when its result can't exist any more (24 h), the
 //    poll says it never will (410/404/frozen, or 3 failures in a row), or the
 //    agent passes `force`.
+//
+// A test key's sample form (mode `sample`) is accepted already done (202
+// status "done", cost 0): the same path then fetches its result with one
+// GET /v1/jobs/{id} (the poll loop reads before it ever sleeps), no waiting.
 
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
@@ -57,7 +61,7 @@ import {
 } from "./cache.js";
 import { compactView } from "./compact.js";
 import { ToolError } from "./errors.js";
-import { estimateAnalyze } from "./estimate.js";
+import { estimateAnalyze, sampleEstimate } from "./estimate.js";
 import { isPasswordError, passwordError, readInputPdf } from "./fill.js";
 import { toArrayBuffer } from "./fonts.js";
 import { log } from "./log.js";
@@ -71,12 +75,12 @@ import {
 } from "./merge.js";
 import { parsePageSpec } from "./pages.js";
 import { pollJobLoop } from "./poll.js";
-import type { Account, JobBody } from "./types.js";
+import type { Account, JobBody, JobMode } from "./types.js";
 
 export interface JobRef {
   job_id: string;
   pages: number[];
-  mode: "ai" | "acroform";
+  mode: JobMode;
   cost: number;
   /** The pending entry recording this job, and the options it was started
    *  with (they may cover more than the request that resumed it). */
@@ -317,10 +321,14 @@ export function jobCovers(
   if (want.options.save_as_template && accessOf(o) !== accessOf(want.options)) return false;
   // Extra-blank detection: only a job that ran it (or an AI job: vision
   // already looks everywhere) covers it, and only on the pages it scanned.
+  // A sample job (a test key's) serves the form's whole published schema:
+  // every page, and every blank fenfill knows of.
   const extra = want.options.detect_extra_blanks === true;
-  if (extra && o.detect_extra_blanks !== true && job.mode !== "ai") return false;
+  if (extra && o.detect_extra_blanks !== true && job.mode !== "ai" && job.mode !== "sample") {
+    return false;
+  }
   if (o.pages === want.options.pages) return true;
-  if (job.mode === "acroform" && !extra) return true;
+  if ((job.mode === "acroform" && !extra) || job.mode === "sample") return true;
   let have: number[] | null;
   const extraPages = extra ? extraBlanksPagesOf(job) : null;
   if (extraPages) have = extraPages;
@@ -542,9 +550,13 @@ export async function analyzeForm(
   };
 
   // Estimate only: count pages and probe native fields here, no upload. The
-  // one request is GET /v1/account (scans_remaining), when a key is set.
+  // one request is GET /v1/account (scans_remaining), when a key is set. A
+  // test key never spends scans (sample forms only): no request at all.
   if (args.estimate === true) {
     const hit = force ? null : await fromCache();
+    if (who?.account.mode === "test") {
+      return { ...sampleEstimate({ pageCount, requested, cached: !!hit, sha256: sha }) };
+    }
     return {
       ...(await estimateAnalyze({
         pdf: ab,
@@ -980,6 +992,8 @@ function jobErrorHint(code: string): string {
       return "fenfill found no fillable fields on the analyzed pages. Any reserved scans are refunded.";
     case "template_limit":
       return "Analyze again without save_as_template, or delete a template in fenfill.";
+    case "content_rejected":
+      return "The file was refused by content checks, and any reserved scans are refunded. Submitting the same file again will not help.";
     default:
       return "Any reserved scans are refunded automatically. Call analyze_form again to retry (it re-uploads).";
   }

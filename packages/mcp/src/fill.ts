@@ -336,6 +336,9 @@ export interface StampArgs {
   checkAbs?: string | null;
   /** Loaded only when a value needs the Japanese face; absent = refuse those. */
   jpFace?: JpFaceSource;
+  /** The configured key is a test key (config.ts keyMode): the TEST mark on
+   *  every page of the output and of its check copy. */
+  testMark?: boolean;
 }
 
 export interface StampResult {
@@ -378,6 +381,7 @@ export async function stampAndWrite(a: StampArgs): Promise<StampResult> {
         infoTags: OUTPUT_TAGS,
         check: !!a.checkAbs,
         checkPrinted: printed,
+        testMark: a.testMark === true,
       },
       a.jpFace,
     );

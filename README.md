@@ -50,18 +50,22 @@ after it completes, or 1 hour after it is first fetched, whichever comes first.
 ## Requirements
 
 - Node.js 22 or newer (`npx` comes with it).
-- A fenfill API key (`ff_live_…`): fenfill → Settings → API keys. The API is available on paid
-  plans (Pro and up).
+- A fenfill API key: fenfill → Settings → API keys. Live keys (`ff_live_…`) are on Pro and
+  Business. Test keys (`ff_test_…`) work on every plan, with fenfill's sample forms: build with a
+  test key, go live on Pro (see [Test keys](#test-keys)).
 - Analyzing a form uses one page scan per analyzed page from your plan. Forms that already have
   native PDF form fields are read directly, with no AI, and use none. Repeat analyses of the same
   file come from the local cache. Filling never uses scans. `get_account` shows what's left.
 
 ## Setup
 
+In the examples, put your key where it says `ff_…`: a live key (`ff_live_…`) or a test key
+(`ff_test_…`).
+
 ### Claude Code
 
 ```sh
-claude mcp add fenfill --scope user -e FENFILL_API_KEY=ff_live_… -- npx -y @fenfill/mcp
+claude mcp add fenfill --scope user -e FENFILL_API_KEY=ff_… -- npx -y @fenfill/mcp
 ```
 
 ### Claude Desktop
@@ -76,7 +80,7 @@ Edit `claude_desktop_config.json` (macOS:
     "fenfill": {
       "command": "npx",
       "args": ["-y", "@fenfill/mcp"],
-      "env": { "FENFILL_API_KEY": "ff_live_…" }
+      "env": { "FENFILL_API_KEY": "ff_…" }
     }
   }
 }
@@ -95,28 +99,49 @@ Any client that can launch a stdio server works: run `npx -y @fenfill/mcp` with
 On native Windows, if the client can't find `npx`, use `"command": "cmd"` with
 `"args": ["/c", "npx", "-y", "@fenfill/mcp"]`.
 
+## Test keys
+
+Test keys (`ff_test_…`) work on every plan, so you can build and try the whole flow before you
+pay. They work with fenfill's sample forms only: the forms of fenfill's public forms library.
+
+| With a test key                                                                                                          | What happens                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_sample_forms`                                                                                                      | Lists the sample forms, each with its `pdf_url` and `sha256`. With `download: "<slug>"` it saves that sample's PDF in the cache (`samples/`), checked against its `sha256`, and returns its `path` to pass to `analyze_form`, for clients that can't download files. Works with live keys too.                                    |
+| `analyze_form`                                                                                                           | Takes a sample form only, byte for byte: download it from its `pdf_url` and pass that file unchanged. A copy opened and saved again in another app is a different file and is refused (`test_mode_sample_only`); `estimate: true` shows the file's `sha256` to check first. The result comes back at once and uses no page scans. |
+| `fill_form`, `fill_template`                                                                                             | Work as usual, on your machine. Every page of the PDF carries a TEST mark.                                                                                                                                                                                                                                                        |
+| `make_fillable`                                                                                                          | Works on any plan, for templates saved from sample forms. The PDF carries the TEST mark.                                                                                                                                                                                                                                          |
+| Saved templates (`save_as_template`, `list_templates`, `get_template`, `preview_page`, `edit_template`, `save_template`) | Work, kept apart from live ones: a test key sees only test templates, and a live key (or the fenfill app) never sees them. A workspace keeps up to 10; saving an 11th deletes the oldest.                                                                                                                                         |
+| `create_recipient_link`                                                                                                  | Refused (`test_mode_no_links`): test keys create no links. `get_recipient_status` lists none.                                                                                                                                                                                                                                     |
+| `reanalyze_template`                                                                                                     | Refused (`test_mode_not_available`): a re-analysis spends page scans.                                                                                                                                                                                                                                                             |
+| `get_account`                                                                                                            | Shows `mode: "test"`, with a `test_mode_note`.                                                                                                                                                                                                                                                                                    |
+
+To go live, create a live key on Pro or Business and use it in place of the test key (`ff_test_…`
+becomes `ff_live_…`); nothing else changes. Templates saved with a test key stay with test keys.
+
 ## Tools
 
-| Tool                    | What it does                                                                                               |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards.                            |
-| `fill_form`             | Fills an analyzed PDF locally (your answers never leave your machine) and writes a new flattened PDF.      |
-| `fill_template`         | Fills a saved fenfill template locally.                                                                    |
-| `make_fillable`         | Writes a saved template as a blank fillable PDF (real form fields) for any PDF reader. Team plan or above. |
-| `list_templates`        | Lists the workspace's saved templates, newest first.                                                       |
-| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                                            |
-| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template.                                   |
-| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                                             |
-| `get_account`           | Shows the plan, page scans left and limits.                                                                |
-| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.                                  |
-| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.                              |
-| `save_template`         | Saves `edit_template`'s working copy to a saved template.                                                  |
-| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff.                            |
+| Tool                    | What it does                                                                                              |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| `analyze_form`          | Uploads a **blank** PDF once and returns its fields. Cached locally afterwards.                           |
+| `fill_form`             | Fills an analyzed PDF locally (your answers never leave your machine) and writes a new flattened PDF.     |
+| `fill_template`         | Fills a saved fenfill template locally.                                                                   |
+| `make_fillable`         | Writes a saved template as a blank fillable PDF (real form fields) for any PDF reader. Pro plan or above. |
+| `list_templates`        | Lists the workspace's saved templates, newest first.                                                      |
+| `get_template`          | Shows a template's fields (use `pages` to narrow a large form).                                           |
+| `create_recipient_link` | Creates a personal fill link for one recipient of a restricted template. Business plan.                   |
+| `get_recipient_status`  | Shows those links' status: `pending`, `opened` or `completed`.                                            |
+| `get_account`           | Shows the plan, page scans left and limits.                                                               |
+| `list_sample_forms`     | Lists fenfill's sample forms (the only forms a test key can analyze), with download links.                |
+| `preview_page`          | Renders one page (PNG) with every field box outlined and tagged, locally.                                 |
+| `edit_template`         | Moves, resizes, relabels, retypes, adds, deletes or regroups fields, locally.                             |
+| `save_template`         | Saves `edit_template`'s working copy to a saved template.                                                 |
+| `reanalyze_template`    | Re-analyzes some pages of a saved template, with no upload, and shows the diff.                           |
 
 `analyze_form` options: `pages` (e.g. `"1-3,5"`; long PDFs can be analyzed in chunks, and
 `fill_form` merges them), `save_as_template` (also keep it as a fenfill template), `access`
 (with `save_as_template`: `"public"`, the default, or `"restricted"`, which recipient links
-need), `estimate` (price the request first: counts the pages and spots native form fields on
+need; creating and revoking client links through the API needs the Business plan, while reading
+recipients and status works on any plan with API access), `estimate` (price the request first: counts the pages and spots native form fields on
 your machine, uploads nothing, and returns `page_count`, `likely_mode`, `estimated_scans` and
 `scans_remaining`), `detect_extra_blanks` (for PDFs with native form fields: also find blanks
 that have no native field, such as a signature or date line, at 1 page scan per analyzed page;
@@ -160,7 +185,8 @@ when that follows the box height); a choice's options with their own boxes; a ta
 first cell of each line as `R: …` / `C: …`; a character the bundled fonts lack is shown as `?`
 there, with a warning, and the legend keeps the full text); a `table_rows` table's columns and printed cells
 with their boxes (fill values still go by column id); every date field, table date cell and date
-column's `date_format` (the default `DD/MM/YYYY` when none is stored); and a comb's `cell_type`,
+column's `date_format` (when none is stored: the pattern its label asks for, as in "Date of
+birth (MM/DD/YYYY)", else `DD/MM/YYYY`); and a comb's `cell_type`,
 `max_length`, `date_format`, and in a `crop` its `comb_cells`: each printed cell in reading order with its tag
 (the cell's own field; `index` for one cell of a field drawn over several) and box, plus the
 `date_part` (`D`, `M` or `Y`) each cell of a date comb holds. `warnings` and `placement_warnings` are
@@ -383,7 +409,7 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 
 | Variable                       | Default                   | Notes                                                                        |
 | ------------------------------ | ------------------------- | ---------------------------------------------------------------------------- |
-| `FENFILL_API_KEY`              | (none)                    | `ff_live_…` from fenfill → Settings → API keys.                              |
+| `FENFILL_API_KEY`              | (none)                    | `ff_live_…` or `ff_test_…` from fenfill → Settings → API keys.               |
 | `FENFILL_API_URL`              | `https://api.fenfill.com` | https only (http allowed for localhost).                                     |
 | `FENFILL_CACHE_DIR`            | the OS cache folder       | Holds schemas and blank forms only, never answers.                           |
 | `FENFILL_ANALYZE_WAIT_SECONDS` | `50`                      | How long `analyze_form` / `reanalyze_template` wait before saying "running". |
@@ -422,7 +448,10 @@ fenfill web app for that workspace (for example, your logo if you have set one u
 | Error                                 | What to do                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `missing_api_key` / `invalid_api_key` | Set `FENFILL_API_KEY` in the client's config and restart the client.                                                                                                                                                                                                                                                                                                        |
-| `plan_required`                       | The workspace needs a paid plan (Pro and up).                                                                                                                                                                                                                                                                                                                               |
+| `plan_required`                       | The workspace needs a paid plan: the API and a fillable PDF are on Pro and up, and creating client links through the API on Business. Test keys work on every plan, with fenfill's sample forms.                                                                                                                                                                            |
+| `test_mode_sample_only`               | A test key analyzes fenfill's sample forms only. Get one with `list_sample_forms` and pass the downloaded file unchanged; your own forms need a live key on Pro or Business.                                                                                                                                                                                                |
+| `test_mode_no_links`                  | Test keys can't create links. Use a live key on Pro or Business.                                                                                                                                                                                                                                                                                                            |
+| `test_mode_not_available`             | Not available with a test key (`reanalyze_template`). Use a live key on Pro or Business.                                                                                                                                                                                                                                                                                    |
 | `insufficient_scans`                  | Not enough page scans left; analyze fewer `pages` or check `get_account`.                                                                                                                                                                                                                                                                                                   |
 | `prefilled_form` / `filled_output`    | Only blank forms can be analyzed; use the original, empty PDF. If it is the blank form (some ship with default text in their fields), use the fenfill web app. When the refusal is about annotations or XFA values that belong to the blank form, pass `confirm_blank: true`.                                                                                               |
 | `pdf_password_required`               | Remove the open password first; owner-password PDFs work as they are.                                                                                                                                                                                                                                                                                                       |

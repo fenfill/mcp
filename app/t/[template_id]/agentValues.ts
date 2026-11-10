@@ -11,7 +11,10 @@
 // (agentValues.parity.test.ts proves it on every tests/fixtures/agent_schema
 // fixture): only fields on pages listed in `pages[]` (each page number once),
 // only groups with at least one resolvable member, only known group kinds; a
-// field that is a member of ANY group is never exposed on its own.
+// field that is a member of ANY group is never exposed on its own — except the
+// members of a split group that does not project as one entry (a parts split
+// not naming exactly two resolvable members, a flow split with fewer than two),
+// which are exposed as the plain text fields they are.
 //
 // Node-safe: no fs, no DOM, no React, no store. pdf-lib is imported lazily,
 // like stampPdf. Signature images are read through the injected `loadImage`.
@@ -19,7 +22,14 @@
 import type * as PdfLibModule from "pdf-lib";
 import type { PDFDict, PDFDocument, PDFObject } from "pdf-lib";
 
-import { type Field, type Group, groupFormatOf, type TemplateSchema } from "@/types";
+import {
+  type Field,
+  type Group,
+  groupFormatOf,
+  splitFracDigitsOf,
+  splitPadFracOf,
+  type TemplateSchema,
+} from "@/types";
 
 import { needsBidi, stampsRtl, stripBidiControls } from "./bidiText";
 import { combDateWrites, combEntries, type CombSlot, combSlots, isDmyFormat } from "./combFill";
@@ -31,6 +41,7 @@ import {
   expKey,
   expLayout,
   fieldKey,
+  flowKey,
   MULTI_SEP,
   resolveMembers,
 } from "./fillKeys";
@@ -38,6 +49,7 @@ import { buildMarks } from "./fillMarks";
 import { marksNeedJpFace, needsJpFace } from "./fontRuns";
 import { normalizeSchema } from "./normalizeSchema";
 import { dataUrlToBytes } from "./signatureImage";
+import { distributeParts, flowSplitBoxes, partsMembers } from "./splitFill";
 import {
   embedStampFaces,
   FENFILL_OUTPUT_TAG,
@@ -82,7 +94,8 @@ export type LoadImage = (path: string) => Uint8Array;
 /** An input's agent type (a field, a table cell, a table_rows column). */
 export type AgentFieldType = "text" | "multiline" | "date" | "checkbox" | "signature" | "comb";
 
-export type AgentType = AgentFieldType | "radio" | "multiselect" | "table" | "table_rows";
+export type AgentType =
+  AgentFieldType | "number" | "radio" | "multiselect" | "table" | "table_rows";
 
 export interface AgentCell {
   id: string;
@@ -122,6 +135,24 @@ export type AgentEntry =
       maxLength: number;
       cellType: "integer" | "char" | "date";
       dateFormat: string | null;
+    })
+  | (GroupBase & {
+      /** A split/parts group: one amount over [int, frac] (group.members order). */
+      kind: "split";
+      type: "number";
+      rule: "parts";
+      fracDigits: number;
+      padFrac: boolean;
+      parts: [int: Field, frac: Field];
+    })
+  | (GroupBase & {
+      /** A split/flow group: one text wrapped box to box, stored whole under
+       *  flowKey (buildMarks breaks it over the boxes). */
+      kind: "split";
+      type: "text";
+      rule: "flow";
+      /** The boxes in group.members order (the reading order the text flows in). */
+      boxes: Field[];
     })
   | (GroupBase & { kind: "choice"; type: "radio" | "multiselect"; options: Field[] })
   | (GroupBase & { kind: "table"; type: "table"; cells: AgentCell[] })
@@ -206,6 +237,28 @@ function classicRows(
   });
 }
 
+/** A parts split's [int, frac] fields (group.members order), or null when the
+ *  group is not one: agent_schema.py `_split_parts`. */
+function splitParts(g: Group, fieldById: Map<string, Field>): [Field, Field] | null {
+  if (g.rule !== "parts" || !Array.isArray(g.members)) return null;
+  const ids: unknown[] = g.members;
+  const fs = ids.map((id) => (typeof id === "string" ? fieldById.get(id) : undefined));
+  return partsMembers(
+    g,
+    fs.filter((f): f is Field => !!f),
+  );
+}
+
+/** Whether a group's members belong to it in the agent view. A split that is
+ *  not one entry (a malformed parts or flow) gives its members back as loose
+ *  text fields: an agent must never lose a box. agent_schema.py
+ *  `_claims_members`. */
+function claimsMembers(g: Group, fieldById: Map<string, Field>): boolean {
+  return (
+    g.kind !== "split" || splitParts(g, fieldById) !== null || flowSplitBoxes(g, fieldById) !== null
+  );
+}
+
 function groupEntry(g: Group, members: Field[], fieldById: Map<string, Field>): AgentEntry | null {
   const base = { id: g.id, label: labelOf(g), required: g.required === true, group: g, members };
   const kind: unknown = g.kind;
@@ -225,6 +278,36 @@ function groupEntry(g: Group, members: Field[], fieldById: Map<string, Field>): 
       maxLength: slots.reduce((n, s) => n + s.len, 0),
       cellType,
       dateFormat: cellType === "date" && fmt !== "" ? fmt : null,
+    };
+  }
+  if (kind === "split") {
+    // A parts split with its two boxes, or a flow split with two or more, is
+    // one entry (masterplan D4); the rest never reach here (claimsMembers),
+    // their members project loose.
+    const boxes = flowSplitBoxes(g, fieldById);
+    if (boxes) {
+      return {
+        ...base,
+        // D3: a split's label falls back to its first box's, like its autofill.
+        label: base.label || labelOf(boxes[0]),
+        kind: "split",
+        type: "text",
+        rule: "flow",
+        boxes,
+      };
+    }
+    const parts = splitParts(g, fieldById);
+    if (!parts) return null;
+    return {
+      ...base,
+      // D3: a split's label falls back to its integer box's, like its autofill.
+      label: base.label || labelOf(parts[0]),
+      kind: "split",
+      type: "number",
+      rule: "parts",
+      fracDigits: splitFracDigitsOf(g),
+      padFrac: splitPadFracOf(g),
+      parts,
     };
   }
   if (kind !== "table") return null; // unknown kinds render nothing, so expose nothing
@@ -264,7 +347,8 @@ export function agentEntries(schema: TemplateSchema): AgentEntry[] {
   const grouped = new Set<unknown>();
   for (const g of groups) {
     const ids: unknown = g.members;
-    if (Array.isArray(ids)) for (const id of ids) if (typeof id === "string") grouped.add(id);
+    if (!Array.isArray(ids) || !claimsMembers(g, fieldById)) continue;
+    for (const id of ids) if (typeof id === "string") grouped.add(id);
   }
   const out: AgentEntry[] = [];
   const seenPages = new Set<unknown>();
@@ -288,7 +372,7 @@ export function agentEntries(schema: TemplateSchema): AgentEntry[] {
       });
     }
     for (const g of groups) {
-      if (g.page !== pno) continue;
+      if (g.page !== pno || !claimsMembers(g, fieldById)) continue;
       const members = Array.isArray(g.members) ? resolveMembers(g, fieldById) : [];
       if (members.length === 0) continue;
       const e = groupEntry(g, members, fieldById);
@@ -764,7 +848,7 @@ export function nestedIdOwners(entries: readonly AgentEntry[]): Map<string, Nest
     if (e.kind === "choice") for (const o of e.options) put(o.id, "option", "an option", e);
     if (e.kind === "table") for (const c of e.cells) put(c.id, "cell", "a cell", e);
     if (e.kind === "table_rows") for (const c of e.columns) put(c.id, "column", "a column", e);
-    for (const m of e.members) put(m.id, "member", "a cell", e);
+    for (const m of e.members) put(m.id, "member", e.kind === "split" ? "a box" : "a cell", e);
   }
   return out;
 }
@@ -838,6 +922,38 @@ function mapInternal(
           return false;
         }
         for (const [k, v] of combEntries(e.slots, c.chars)) {
+          out.values[k] = v;
+          out.keyIds.set(k, e.id);
+        }
+        return true;
+      }
+      case "split": {
+        if (e.rule === "flow") {
+          // One text over the boxes, stored whole (D11): a line break moves on
+          // to the next box, so newlines are kept. Every box's mark is this
+          // entry's, for the placement warnings.
+          const c = coerceText(raw, true);
+          if ("reason" in c) {
+            skip(e.id, c.reason);
+            return false;
+          }
+          write(flowKey(e.id), c, e.id, true);
+          for (const b of e.boxes) out.keyIds.set(fieldKey(b.id), e.id);
+          return true;
+        }
+        if (typeof raw !== "string" && typeof raw !== "number") {
+          skip(
+            e.id,
+            `expected an amount (a string such as "1234.56" or "1 234,56", or a non-negative number), got ${kindOf(raw)}`,
+          );
+          return false;
+        }
+        const w = distributeParts(raw, e.group, e.parts);
+        if (!w.ok) {
+          skip(e.id, w.reason);
+          return false;
+        }
+        for (const [k, v] of w.entries) {
           out.values[k] = v;
           out.keyIds.set(k, e.id);
         }
@@ -995,6 +1111,8 @@ function mapInternal(
     if (e.kind === "field") keys = [fieldKey(e.id)];
     else if (e.kind === "choice") keys = [choiceKey(e.id)];
     else if (e.kind === "comb") keys = e.slots.map((s) => s.key);
+    else if (e.kind === "split")
+      keys = e.rule === "flow" ? [flowKey(e.id)] : e.parts.map((f) => fieldKey(f.id));
     else if (e.kind === "table") keys = e.cells.map((c) => fieldKey(c.id));
     else {
       const n = out.rowCounts[e.id] ?? 1;
@@ -1792,6 +1910,9 @@ export interface FillAgentPdfArgs {
    *  off the stamped values. The browser has no text layer to give; the MCP reads it
    *  with PDFium (none on a scan). */
   checkPrinted?: Readonly<Record<number, readonly PageRegion[]>>;
+  /** The API test-key mark on every page (StampOptions.testMark). The check
+   *  copy is built from the stamped PDF, so it carries the mark too. */
+  testMark?: boolean;
 }
 
 export interface FillAgentPdfResult {
@@ -1822,6 +1943,7 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
     groups: schema.groups,
     values: m.values,
     rowCounts: m.rowCounts,
+    pages: schema.pages,
   });
   // The whole document, not just the pages a caller looks at: stampPdf's own
   // fallback fetches the face by relative URL, which only resolves on the web.
@@ -1842,6 +1964,7 @@ export async function fillAgentPdf(a: FillAgentPdfArgs): Promise<FillAgentPdfRes
     logoBytes: a.logoBytes,
     infoTags: a.infoTags,
     onPlacement: (p) => placements.push(p),
+    testMark: a.testMark,
   });
   const placed = [
     ...placementWarnings(placements, m.keyIds),

@@ -1,7 +1,9 @@
-// Environment configuration. Split in two on purpose: fill_form reads ONLY the
-// cache location (it never touches the network, and never even reads the API
-// key), while the network tools read the API settings on use. A missing key
-// therefore breaks only the tools that need it.
+// Environment configuration. Split in two on purpose: fill_form needs only the
+// cache location. It never touches the network and never sends the API key;
+// it reads the key on this machine alone, for its prefix (keyMode: a test key
+// puts the TEST mark on the output) and a hash of it (which account's cached
+// edits apply), and works without one. The network tools read the API
+// settings on use. A missing key therefore breaks only the tools that need it.
 
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -20,7 +22,21 @@ export interface ApiConfig {
   apiUrl: string; // origin (+ optional path prefix), no trailing slash
 }
 
-const KEY_RE = /^ff_live_[A-Za-z0-9_-]{20,200}$/;
+const KEY_RE = /^ff_(?:live|test)_[A-Za-z0-9_-]{20,200}$/;
+
+/**
+ * Whether the configured FENFILL_API_KEY is a test key (`ff_test_`, which
+ * works on fenfill's sample forms only; the local fills it makes carry the
+ * TEST mark) or a live one (`ff_live_`); null when no key is set or the
+ * prefix is neither. Reads the prefix only, on this machine: nothing is sent.
+ * Whether the rest of the key is well formed is apiConfigFromEnv's business.
+ */
+export function keyMode(env: Env = process.env): "live" | "test" | null {
+  const key = env.FENFILL_API_KEY?.trim() ?? "";
+  if (key.startsWith("ff_test_")) return "test";
+  if (key.startsWith("ff_live_")) return "live";
+  return null;
+}
 
 /** The OS per-user cache directory + `fenfill-mcp`. */
 export function defaultCacheDir(env: Env = process.env, platform = process.platform): string {
@@ -96,7 +112,7 @@ export function apiConfigFromEnv(env: Env = process.env): ApiConfig {
   }
   if (!KEY_RE.test(apiKey)) {
     throw new ToolError("invalid_api_key", "FENFILL_API_KEY doesn't look like a fenfill API key.", {
-      hint: "Keys start with ff_live_. Copy it again from fenfill (Settings → API keys).",
+      hint: "Keys start with ff_live_ (live) or ff_test_ (test). Copy it again from fenfill (Settings → API keys).",
     });
   }
   return { apiKey, apiUrl };

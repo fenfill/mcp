@@ -2,8 +2,8 @@
 // and checkbox symbols are the FORM's wording; an agent that copies an answer
 // into one would write it to the edits/ working copy and send it to fenfill
 // with save_template. So this process remembers the free-text answers it was
-// given (fill_form / fill_template / preview_page: text, multiline, date and
-// comb values, never checkbox or option choices). edit_template rejects an op
+// given (fill_form / fill_template / preview_page: text, multiline, date,
+// comb and split values, never checkbox or option choices). edit_template rejects an op
 // whose new wording matches one BEFORE the working copy is written, and
 // save_template checks the whole copy again before any request. A match is
 // wording that holds a remembered answer of 6+ characters ("Name: Jan
@@ -42,6 +42,9 @@
 import {
   agentEntries,
   buildMarks,
+  fieldKey,
+  flowKey,
+  joinSplit,
   mapAgentValues,
   normalizeSchema,
 } from "@/app/t/[template_id]/fillCore";
@@ -197,20 +200,25 @@ export class EchoGuard {
 
   /** The same answers as the page shows them: the text of every mark the core
    *  would stamp for these values (a date in its field's format, text as
-   *  normalized), a comb's cells joined into one answer. */
+   *  normalized), a comb's cells joined into one answer, a split amount's
+   *  boxes read back as the one amount (joinSplit: "1234.56"), a flow split's
+   *  whole text as stored as well as the line each box shows. */
   private addShown(
     schema: ReturnType<typeof normalizeSchema>,
     entries: ReturnType<typeof agentEntries>,
     values: Record<string, unknown>,
   ): void {
     const shown = new Map<string, string>(); // mark key → text (`key#i` cells joined)
+    let stored: Record<string, string> = {};
     try {
       const mapped = mapAgentValues(schema, values, { loadImage: NO_IMAGE });
+      stored = mapped.values;
       const marks = buildMarks({
         fields: schema.fields,
         groups: schema.groups,
         values: mapped.values,
         rowCounts: mapped.rowCounts,
+        pages: schema.pages,
       });
       for (const page of marks.values()) {
         for (const m of page) {
@@ -232,6 +240,17 @@ export class EchoGuard {
       this.add(cells);
       if (e.dateFormat) this.add(inPrintedFormat(cells, e.dateFormat));
     }
+    for (const e of entries) {
+      if (e.kind !== "split") continue;
+      if (e.rule === "flow") {
+        this.add(stored[flowKey(e.id)]);
+        continue;
+      }
+      // The integer box stays an answer of its own ("1234"); the fraction box
+      // alone ("56") is not one.
+      shown.delete(fieldKey(e.parts[1].id));
+      this.add(joinSplit(e.group, e.parts, stored));
+    }
     for (const [, text] of shown) this.add(text);
   }
 
@@ -252,6 +271,8 @@ export class EchoGuard {
       if (v === undefined) continue;
       if (e.kind === "field" || e.kind === "comb") {
         if (FREE_TEXT.has(e.type)) this.add(v);
+      } else if (e.kind === "split") {
+        this.add(v); // an amount or a flow's text, as passed (a number too)
       } else if (e.kind === "table" && isRec(v)) {
         for (const c of e.cells) if (FREE_TEXT.has(c.type)) this.add(v[c.id]);
       } else if (e.kind === "table_rows" && Array.isArray(v)) {

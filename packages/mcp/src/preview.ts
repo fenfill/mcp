@@ -123,6 +123,11 @@ export interface LegendRow {
   cell_type?: string;
   max_length?: number;
   comb_cells?: { tag: string; index?: number; box: LegendRow["box"]; date_part?: string }[];
+  /** A split: its rule ("parts", type number: an integer box and a fraction
+   *  box, filled from one amount; "flow", type text: one text wrapped box to
+   *  box) and, for parts, how many digits the fraction box takes. */
+  rule?: string;
+  frac_digits?: number;
   /** A single-line text/date field: the size its value starts at, and whether that follows the box (Auto). */
   font_pt?: number;
   font_auto?: boolean;
@@ -269,6 +274,10 @@ export function legendRows(render: RenderSchema, page: number): LegendRow[] {
         box: c.box,
         ...(fmt.length === e.maxLength && fmt[i] ? { date_part: fmt[i] } : {}),
       }));
+    }
+    if (e.kind === "split") {
+      row.rule = e.rule;
+      if (e.rule === "parts") row.frac_digits = e.fracDigits;
     }
     if (e.kind === "choice") {
       row.options = e.options.map((o) => ({

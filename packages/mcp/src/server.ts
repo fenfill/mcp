@@ -1,4 +1,4 @@
-// The MCP server: thirteen tools over /v1 plus local filling, previews and
+// The MCP server: fourteen tools over /v1 plus local filling, previews and
 // layout corrections.
 //
 // PRIVACY: fill values arrive as the `values` argument of fill_form /
@@ -46,6 +46,7 @@ import {
   apiConfigFromEnv,
   cacheDirFromEnv,
   type Env,
+  keyMode,
   waitSecondsFromEnv,
 } from "./config.js";
 import { asToolError, ToolError } from "./errors.js";
@@ -85,9 +86,10 @@ import {
 } from "./preview.js";
 import { analyzedPagesOf, RERUN_KINDS, reanalyzeTemplate } from "./reanalyze.js";
 import { DEFAULT_DPI, MAX_DPI } from "./render.js";
+import { downloadSample } from "./samples.js";
 import { pageOfId, prepareSnapper, snapPages } from "./snap.js";
 import { SWEEP_INTERVAL_MS, sweepCache } from "./sweep.js";
-import type { Account, AgentSchema, RenderSchema, TemplateUpdated } from "./types.js";
+import type { Account, AgentSchema, RenderSchema, SampleList, TemplateUpdated } from "./types.js";
 import { schemaIssues } from "./validate.js";
 import { expandValueKeys } from "./values.js";
 import { VERSION } from "./version.js";
@@ -122,6 +124,7 @@ const TOOL_NAMES = [
   "create_recipient_link",
   "get_recipient_status",
   "get_account",
+  "list_sample_forms",
   "preview_page",
   "edit_template",
   "save_template",
@@ -134,16 +137,34 @@ export { TOOL_NAMES };
 // (agentValues.ts coerceDate, as the browser stores it) and prints in the
 // field's date_format (fillMarks.ts, every fill path).
 const VALUE_SHAPES =
-  'values maps field ids to: text/multiline = string, stamped exactly as given (a date in a text field goes in the format its label or placeholder asks, e.g. "mmddyyyy" → "10042026"); date = "YYYY-MM-DD", printed in the field\'s date_format (shown on the field, e.g. DD/MM/YYYY); comb = string, one character per cell; checkbox = boolean; radio = option id or label, or the bare option text ("No" for "Smoke? No"); multiselect = array of those; table = {cellId: value}; table_rows = [{columnId: value}, …]; signature = {"image_path": "/abs/sig.png"} (PNG or JPG). A signature with signing_requirement "external" is signed outside fenfill (on paper or by e-sign) and stays blank.';
+  'values maps field ids to: text/multiline = string, stamped exactly as given (a date in a text field goes in the format its label or placeholder asks, e.g. "mmddyyyy" → "10042026"); date = "YYYY-MM-DD", printed in the field\'s date_format (shown on the field, e.g. DD/MM/YYYY); comb = string, one character per cell; checkbox = boolean; radio = option id or label, or the bare option text ("No" for "Smoke? No"); multiselect = array of those; table = {cellId: value}; table_rows = [{columnId: value}, …]; number = one amount, e.g. 1234.56; signature = {"image_path": "/abs/sig.png"} (PNG or JPG). A signature with signing_requirement "external" is signed outside fenfill (on paper or by e-sign) and stays blank.';
 
 const INSTRUCTIONS = [
   "fenfill turns blank PDF forms into fillable ones.",
   "Local file: analyze_form(path) returns the form's fields (the blank form is uploaded once; results are cached, repeat calls are free), then fill_form(path, values, output_path) fills it on this machine.",
-  "Saved templates: list_templates → get_template → fill_template; make_fillable writes one as a blank fillable PDF for any PDF reader (Team plan or above).",
+  "Saved templates: list_templates → get_template → fill_template; make_fillable writes one as a blank fillable PDF for any PDF reader (Pro plan or above).",
   "preview_page shows a page with every field box outlined and tagged (rendered on this machine); edit_template fixes a misplaced, missing or mislabeled field locally; save_template keeps the fix in a saved template.",
   "A saved template's page that was never analyzed (get_template unanalyzed_pages) or came out badly: reanalyze_template re-runs fenfill on just those pages, from the PDF already stored with it.",
   "Fill values never leave this machine: they are not sent to fenfill or anywhere else.",
 ].join(" ");
+
+/**
+ * With a test key (ff_test_), appended to INSTRUCTIONS and to the descriptions
+ * of the tools it changes (analyze_form, fill_form, fill_template,
+ * make_fillable, get_account), so the model can tell the user. Read from the
+ * key's prefix at startup, on this machine. A live key's text is unchanged.
+ */
+export const TEST_MODE_LINE =
+  "This server uses a test key (ff_test_): analyze_form takes only fenfill's sample forms (list_sample_forms) and uses no page scans, output PDFs carry a TEST mark, and recipient links can't be created. To go live, use a live key (ff_live_) on Pro or Business.";
+/** make_fillable's plan gate doesn't apply to a test key (its templates are sample forms). */
+const TEST_MODE_FILLABLE = " With a test key, make_fillable works on any plan.";
+/** get_account's `test_mode_note` when fenfill says the key is a test key. */
+export const TEST_MODE_NOTE =
+  "This is a test key: analyze_form takes only fenfill's sample forms (list_sample_forms), the PDFs it makes carry a TEST mark and it can't create links; to go live, use a live key (ff_live_) on Pro or Business.";
+
+/** list_sample_forms' answer to a download. */
+export const SAMPLE_PATH_NOTE =
+  "Pass this path to analyze_form unchanged: the file is the sample byte for byte (its sha256 was checked).";
 
 const TEMPLATE_ID = z
   .string()
@@ -157,7 +178,7 @@ const PAGES = z
 const VALUES = z
   .record(z.string(), z.unknown())
   .describe(
-    "Field id → value (see description). Any id may be shortened to an unambiguous prefix of 4+ characters (the preview tags show 6), a table's cell or column id inside its value and an option id in a choice's value too. A table cell's id given at the top level goes into its table; an option's id given true selects it (a radio's value, or one more item of a multiselect). A date comb (a comb group with cell_type date) takes the whole date as one string: YYYY-MM-DD (laid out by its date_format), or its max_length digits in printed order; a single field drawn over cells takes one character per cell, as typed. A key that matches nothing, or starts several ids, is listed in skipped with candidates.",
+    "Field id → value (see description). Any id may be shortened to an unambiguous prefix of 4+ characters (the preview tags show 6), a table's cell or column id inside its value and an option id in a choice's value too. A table cell's id given at the top level goes into its table; an option's id given true selects it (a radio's value, or one more item of a multiselect). A date comb (a comb group with cell_type date) takes the whole date as one string: YYYY-MM-DD (laid out by its date_format), or its max_length digits in printed order; a single field drawn over cells takes one character per cell, as typed. A number entry (kind split) is one amount printed over an integer box and a fraction box (zł | gr): pass it whole, as a number or a string (1234.56 or 1 234,56), with at most frac_digits decimals (never rounded) and no minus sign; fenfill splits it over the boxes. A text entry with kind split (rule flow) is one text printed over several boxes in order (an address over its lines): pass it whole as one string; fenfill wraps it box to box (a line break moves on to the next box), and text too long for the last box is reported like an overlong field. A key that matches nothing, or starts several ids, is listed in skipped with candidates.",
   );
 const OUTPUT_PATH = z
   .string()
@@ -264,6 +285,11 @@ async function refreshSavedAnalyses(
 export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
   const env = opts.env ?? process.env;
   const now = opts.now ?? Date.now;
+  // Test or live, from the key's prefix (no network): only the wording the
+  // model reads changes here; fenfill enforces what a test key may do.
+  const testKey = keyMode(env) === "test";
+  const forKey = (text: string, extra = "") =>
+    testKey ? `${text} ${TEST_MODE_LINE}${extra}` : text;
   const sleep =
     opts.sleep ??
     (async (ms: number, signal?: AbortSignal) => {
@@ -333,7 +359,11 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     }
     return {
       api_origin: cfg.apiUrl,
-      account: { workspace_id: workspaceByKey.get(keySha) ?? null, key_sha: keySha },
+      account: {
+        workspace_id: workspaceByKey.get(keySha) ?? null,
+        key_sha: keySha,
+        ...(keyMode(env) === "test" ? { mode: "test" as const } : {}),
+      },
     };
   };
 
@@ -467,7 +497,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
 
   const server = new McpServer(
     { name: "fenfill", version: VERSION },
-    { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
+    { capabilities: { tools: {} }, instructions: forKey(INSTRUCTIONS) },
   );
 
   const run =
@@ -493,8 +523,9 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "analyze_form",
     {
       title: "Analyze a blank PDF form",
-      description:
+      description: forKey(
         'Analyze a blank PDF form with fenfill and list its fillable fields (ids, types, labels). Uploads only the blank form. Costs one page scan per analyzed page unless cached or the PDF has native form fields (free; detect_extra_blanks adds a paid scan of the chosen pages for blanks without a native field); pass estimate: true first to see the cost without uploading. Results are cached locally, so repeat calls and narrowing with `pages` are free. If it returns status "running", call it again with the same arguments. To correct the layout and keep the corrections, analyze with save_as_template: true (edits on an unsaved analysis can be used for filling/preview but can\'t be saved). A rate-limit or busy refusal is waited out automatically (up to about a minute) before it is reported.',
+      ),
       inputSchema: {
         path: z.string().min(1).max(4096).describe("Absolute path (or ~/…) to the blank PDF."),
         pages: PAGES.describe(
@@ -577,7 +608,9 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "fill_form",
     {
       title: "Fill an analyzed PDF locally",
-      description: `Fill a PDF you analyzed with analyze_form and write a new, flattened PDF. Runs entirely on this machine and the values never leave it; the only network use is a one-time download of the public Japanese font from fenfill.com, the first time a value needs it (it carries no form data). ${VALUE_SHAPES} Returns filled/skipped counts and warnings, including text shrunk hard or running past its box and filled boxes that overlap; pass check_pdf to see the result.`,
+      description: forKey(
+        `Fill a PDF you analyzed with analyze_form and write a new, flattened PDF. Runs entirely on this machine and the values never leave it; the only network use is a one-time download of the public Japanese font from fenfill.com, the first time a value needs it (it carries no form data). ${VALUE_SHAPES} Returns filled/skipped counts and warnings, including text shrunk hard or running past its box and filled boxes that overlap; pass check_pdf to see the result.`,
+      ),
       inputSchema: {
         path: z
           .string()
@@ -625,6 +658,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         overwrite: overwrite === true,
         cache,
         checkAbs,
+        testMark: keyMode(env) === "test",
       });
       return wc ? { ...res, edited: true, edited_note: EDITED_NOTE } : res;
     }),
@@ -635,7 +669,9 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "fill_template",
     {
       title: "Fill a saved template locally",
-      description: `Fill a saved fenfill template and write a flattened PDF. The blank PDF and field schema are downloaded; filling happens on this machine and the values are never sent anywhere. ${VALUE_SHAPES}`,
+      description: forKey(
+        `Fill a saved fenfill template and write a flattened PDF. The blank PDF and field schema are downloaded; filling happens on this machine and the values are never sent anywhere. ${VALUE_SHAPES}`,
+      ),
       inputSchema: {
         template_id: TEMPLATE_ID,
         values: VALUES,
@@ -706,6 +742,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           overwrite: overwrite === true,
           cache,
           checkAbs,
+          testMark: keyMode(env) === "test",
         });
         return wc
           ? { template_id, ...res, edited: true, edited_note: EDITED_NOTE }
@@ -721,8 +758,10 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "make_fillable",
     {
       title: "Make a fillable PDF from a saved template",
-      description:
-        "Turn one of your saved fenfill templates into a blank fillable PDF: the original form with a real form field on every blank, so it can be filled in any PDF reader. The fields are empty; this tool takes no values and never sends any (only the template id goes to fenfill). Uses the template as saved in fenfill: unsaved local edits (edit_template) are not in it, so save_template first. Needs the Team plan or above; to fill the form yourself, use fill_template (any plan). If some fields couldn't be placed, the result has skipped_fields and a skipped_note saying how to fix them.",
+      description: forKey(
+        "Turn one of your saved fenfill templates into a blank fillable PDF: the original form with a real form field on every blank, so it can be filled in any PDF reader. The fields are empty; this tool takes no values and never sends any (only the template id goes to fenfill). Uses the template as saved in fenfill: unsaved local edits (edit_template) are not in it, so save_template first. Needs the Pro plan or above; to fill the form yourself, use fill_template (any plan). If some fields couldn't be placed, the result has skipped_fields and a skipped_note saying how to fix them.",
+        TEST_MODE_FILLABLE,
+      ),
       inputSchema: {
         template_id: TEMPLATE_ID,
         output_path: OUTPUT_PATH,
@@ -864,7 +903,7 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     {
       title: "Create a recipient link",
       description:
-        'Create a personal fill link for one recipient of a restricted template (analyze_form with save_as_template: true and access: "restricted" makes one; a public template answers template_not_restricted). Needs a plan with recipient links. Track it with get_recipient_status.',
+        'Create a personal fill link for one recipient of a restricted template (analyze_form with save_as_template: true and access: "restricted" makes one; a public template answers template_not_restricted). Creating and revoking client links through the API needs the Business plan. Reading recipients and status works on any plan with API access. Each link counts toward the plan\'s monthly client links. Track it with get_recipient_status.',
       inputSchema: {
         template_id: TEMPLATE_ID,
         label: z.string().min(1).max(60).describe("Who it's for, e.g. a name (1–60 characters)."),
@@ -872,7 +911,15 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
           .string()
           .max(64)
           .optional()
-          .describe("Optional ISO 8601 expiry, e.g. 2026-12-31T23:59:59Z."),
+          .describe(
+            "Optional ISO 8601 expiry, e.g. 2026-12-31T23:59:59Z. Omitted: the link expires in 30 days.",
+          ),
+        no_expiry: z
+          .boolean()
+          .optional()
+          .describe(
+            "true: the link never expires (only when the user asks for that). Not with expires_at.",
+          ),
       },
       annotations: {
         readOnlyHint: false,
@@ -881,13 +928,17 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
         openWorldHint: true,
       },
     },
-    run("create_recipient_link", async ({ template_id, label, expires_at }, _extra, signal) => {
-      return api().postJson(
-        `/templates/${encodeURIComponent(template_id)}/recipients`,
-        { label, expires_at: expires_at ?? null },
-        { signal },
-      );
-    }),
+    run(
+      "create_recipient_link",
+      async ({ template_id, label, expires_at, no_expiry }, _extra, signal) => {
+        return api().postJson(
+          `/templates/${encodeURIComponent(template_id)}/recipients`,
+          // The API's default for a null expires_at is 30 days (audit F4-a).
+          { label, expires_at: expires_at ?? null, ...(no_expiry ? { no_expiry: true } : {}) },
+          { signal },
+        );
+      },
+    ),
   );
 
   server.registerTool(
@@ -911,13 +962,57 @@ export function createFenfillServer(opts: ServerOptions = {}): FenfillServer {
     "get_account",
     {
       title: "Account and limits",
-      description:
+      description: forKey(
         "Show this API key's plan, page scans left and limits. To price an analysis, call analyze_form with estimate: true instead: it counts the pages and detects native fields locally, with no upload, and compares that with scans_remaining.",
+      ),
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run("get_account", async (_args, _extra, signal) => {
-      return (await api().getJson<Account>("/account", { signal })).body;
+      const { body: acct } = await api().getJson<Account>("/account", { signal });
+      return acct.mode === "test" ? { ...acct, test_mode_note: TEST_MODE_NOTE } : acct;
+    }),
+  );
+
+  // ---- sample forms ----------------------------------------------------------------------
+  // The /v1 GET carries nothing but the key. `download` only picks a listed
+  // sample: its PDF is a plain GET of that sample's pdf_url, without the key
+  // (samples.ts), into the cache.
+  server.registerTool(
+    "list_sample_forms",
+    {
+      title: "List fenfill's sample forms",
+      description:
+        "List fenfill's sample forms: real blank forms from fenfill's public forms library, each with slug, title, issuer, pages, field_count, sha256 and pdf_url. With a test key (ff_test_), analyze_form accepts only these exact files: download one from its pdf_url and analyze the downloaded file unchanged (opening and saving it again in another app changes its bytes and its sha256, and it is then refused). Or pass download: a sample's slug, and this tool saves that PDF on this machine (sha256-checked) and returns its path for analyze_form. Works with live keys too.",
+      inputSchema: {
+        download: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe(
+            "A sample's slug (from this tool's list): save that sample's PDF in the local cache and return its path. Omit to list the samples.",
+          ),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    run("list_sample_forms", async (args, _extra, signal) => {
+      const { body: list } = await api().getJson<SampleList>("/samples", { signal });
+      if (args.download === undefined) return list;
+      const sample = Array.isArray(list.samples)
+        ? list.samples.find((s) => s.slug === args.download)
+        : undefined;
+      if (!sample) {
+        throw new ToolError("sample_not_found", "No sample form has that slug.", {
+          hint: "Call list_sample_forms without arguments to see the samples and their slugs.",
+        });
+      }
+      const { path, cached } = await downloadSample(sample, {
+        cacheDir: cache.root,
+        fetchImpl: opts.fetchImpl,
+        signal,
+      });
+      return { sample, path, cached, note: SAMPLE_PATH_NOTE };
     }),
   );
 

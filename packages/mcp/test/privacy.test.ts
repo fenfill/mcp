@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { extractStampedText } from "@/e2e/helpers/pdfText";
 
+import { sha256Hex } from "../src/cache.js";
 import { setLogSink } from "../src/log.js";
 import { TOOL_NAMES } from "../src/server.js";
 import { connect, env, fixture, json, MockApi, pdfFor, pngBytes, tmp } from "./helpers.js";
@@ -89,7 +90,7 @@ describe("sentinel recorder over every tool", () => {
       .on("GET", /^\/v1\/account$/, () =>
         json(200, {
           workspace_id: "ws-1",
-          tier: "team",
+          tier: "pro",
           scans_remaining: 5,
           max_pages: 100,
           max_pages_per_job: 60,
@@ -132,6 +133,31 @@ describe("sentinel recorder over every tool", () => {
       .on("GET", new RegExp(`^/v1/templates/${TPL}/recipients$`), () =>
         json(200, { recipients: [] }),
       )
+      .on("GET", /^\/v1\/samples$/, () =>
+        json(200, {
+          samples: [
+            {
+              slug: "sample",
+              title: "Sample",
+              issuer: "fenfill",
+              form_code: null,
+              pages: 2,
+              field_count: 12,
+              sha256: sha256Hex(tplPdf),
+              bytes: tplPdf.byteLength,
+              pdf_url: "https://fenfill.com/forms/sample.pdf",
+            },
+          ],
+        }),
+      )
+      .on("GET", /^\/forms\/sample\.pdf$/, (req) => {
+        // list_sample_forms' download: a bare GET of the public file, no key.
+        expect(req.headers.authorization).toBeUndefined();
+        expect(req.body).toBe("");
+        return new Response(new Uint8Array(tplPdf), {
+          headers: { "content-type": "application/pdf" },
+        });
+      })
       .on("POST", new RegExp(`^/v1/templates/${TPL}/analyze$`), (req) => {
         // Only pages, kind and the version: never a value, never a file.
         const body = JSON.parse(req.body) as Record<string, unknown>;
@@ -276,6 +302,12 @@ describe("sentinel recorder over every tool", () => {
       label: "Client",
     });
     results.get_recipient_status = await c.call("get_recipient_status", { template_id: TPL });
+    // After answers were filled this session: the sample list's GET carries none,
+    // and neither does a sample's download (nor the file it saves in the cache).
+    expect((await c.call("list_sample_forms", {})).isError).toBe(false);
+    results.list_sample_forms = await c.call("list_sample_forms", { download: "sample" });
+    expect(results.list_sample_forms.data.cached).toBe(false);
+    expect(mock.count("GET", /^\/forms\/sample\.pdf$/)).toBe(1);
     await c.close();
 
     // Every tool ran, and succeeded.

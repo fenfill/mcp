@@ -11,7 +11,8 @@ export type AgentType =
   | "radio"
   | "multiselect"
   | "table"
-  | "table_rows";
+  | "table_rows"
+  | "number";
 
 export interface AgentEntry {
   id: string;
@@ -58,10 +59,18 @@ export interface RenderSchema {
 
 export type JobStatus = "queued" | "running" | "done" | "error";
 
+/**
+ * How a job analyzes: `ai` (page scans), `acroform` (native fields, free) or
+ * `sample` (a test key's analysis of one of fenfill's sample forms: done at
+ * once from the form's published schema, no page scans).
+ */
+export type JobMode = "ai" | "acroform" | "sample";
+
 export interface AnalyzeAccepted {
   job_id: string;
-  status: "queued";
-  mode: "ai" | "acroform";
+  /** `done` only for a test key's sample form (mode `sample`): already finished. */
+  status: "queued" | "done";
+  mode: JobMode;
   pages: number[];
   cost: number;
   /** Free AcroForm jobs: blanks without a native field look likely. */
@@ -74,7 +83,7 @@ export interface AnalyzeAccepted {
 export interface JobBody {
   job_id: string;
   status: JobStatus;
-  mode: "ai" | "acroform";
+  mode: JobMode;
   phase: string | null;
   progress: number;
   pages: number[];
@@ -123,10 +132,31 @@ export interface TemplateUpdated {
 
 export interface Account {
   workspace_id: string;
+  /** The key's mode: `test` for an ff_test_ key (sample forms only). */
+  mode?: "live" | "test";
   tier: string;
   scans_remaining: number;
   max_pages: number;
   max_pages_per_job: number;
   max_file_mb: number;
   branding: { logo: boolean; watermark: boolean };
+}
+
+/** One of fenfill's sample forms (GET /v1/samples). */
+export interface Sample {
+  slug: string;
+  title: string;
+  issuer: string;
+  form_code: string | null;
+  pages: number;
+  field_count: number;
+  /** Lowercase hex SHA-256 of the PDF at pdf_url: what a test key's analyze matches. */
+  sha256: string;
+  bytes: number;
+  pdf_url: string;
+  [k: string]: unknown;
+}
+
+export interface SampleList {
+  samples: Sample[];
 }

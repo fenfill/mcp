@@ -81,13 +81,41 @@ export interface Estimate {
   status: "estimate";
   page_count: number | null;
   pages: string;
-  likely_mode: "acroform" | "ai" | "cached";
+  likely_mode: "acroform" | "ai" | "cached" | "sample";
   estimated_scans: number;
   scans_remaining: number | null;
   native_field_pages?: string;
   /** AcroForm + the paid extra-blank pass. */
   detect_extra_blanks?: true;
+  /** Test keys: the file's SHA-256, to compare with list_sample_forms. */
+  sha256?: string;
   note: string;
+}
+
+/**
+ * analyze_form's estimate with a test key: it never spends page scans, and
+ * fenfill takes only its sample forms, matched on the exact bytes. Local
+ * only: nothing is requested (the file's sha256 is what the match uses).
+ */
+export function sampleEstimate(e: {
+  pageCount: number | null;
+  requested: number[] | null;
+  cached: boolean;
+  sha256: string;
+}): Estimate {
+  const all = e.pageCount ? Array.from({ length: e.pageCount }, (_, i) => i + 1) : [];
+  return {
+    status: "estimate",
+    page_count: e.pageCount,
+    pages: pagesToSpec(e.requested ?? all),
+    likely_mode: e.cached ? "cached" : "sample",
+    estimated_scans: 0,
+    scans_remaining: null,
+    sha256: e.sha256,
+    note: e.cached
+      ? "Already analyzed on this machine: analyze_form returns it free."
+      : "Test key: analyze_form uses no page scans, and accepts only fenfill's sample forms, byte for byte. list_sample_forms lists them with their sha256; this file's is in sha256.",
+  };
 }
 
 /** What analyze_form would charge for this request, without uploading anything. */

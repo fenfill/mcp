@@ -47,6 +47,7 @@ export {
   expKey,
   expLayout,
   fieldKey,
+  flowKey,
   MULTI_SEP,
   resolveMembers,
   splitMulti,
@@ -54,4 +55,24 @@ export {
 export { buildMarks, type BuildMarksArgs } from "./fillMarks";
 export { JP_FACE_BYTES, JP_FACE_SHA256 } from "./fontRuns";
 export { normalizeSchema } from "./normalizeSchema";
+export {
+  distributeFlow,
+  distributeParts,
+  type FlowMember,
+  flowMemberOf,
+  flowMembers,
+  type FlowOptions,
+  type FlowOverflow,
+  type FlowPage,
+  type FlowResult,
+  flowSplitBoxes,
+  joinSplit,
+  parseParts,
+  type PartsGroup,
+  partsMembers,
+  type PartsParse,
+  type SplitWrite,
+  stampFlowMeasure,
+} from "./splitFill";
+export { stampAdvanceMeasure } from "./stampAdvances";
 export { type Mark, type Placement, type StampOptions, stampPdf } from "./stampPdf";

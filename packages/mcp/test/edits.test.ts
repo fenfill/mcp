@@ -108,6 +108,32 @@ describe("applyOps", () => {
     expect(schemaIssues(r.render)).toEqual([]);
   });
 
+  it("a date's format follows its label's hint until one is set (dateFormatOf)", () => {
+    const r = applyOps(canon(), [
+      { op: "relabel", id: "f-date", label: "Date of birth (MM/DD/YYYY)" },
+      // A partial format pins the format the field already printed: the hint.
+      { op: "set_format", id: "f-date", format: { font_size: 9 } },
+      { op: "relabel", id: "f-text", label: "Due date (DD.MM.RRRR)" },
+      { op: "retype", id: "f-text", type: "date" },
+    ]);
+    expect(r.rejected).toEqual([]);
+    expect(field(r.render, "f-date").format).toEqual({ font_size: 9, date_format: "MM/DD/YYYY" });
+    expect(field(r.render, "f-text").format).toMatchObject({ date_format: "DD.MM.YYYY" });
+    expect(schemaIssues(r.render)).toEqual([]);
+  });
+
+  it("retype date -> comb takes the hinted format's letters", () => {
+    const r = applyOps(canon(), [
+      { op: "relabel", id: "f-date", label: "Date of birth (MM/DD/YYYY)" },
+      { op: "retype", id: "f-date", type: "comb", cells: 8 },
+    ]);
+    expect(r.rejected).toEqual([]);
+    const comb = r.render.groups.find(
+      (g) => g.kind === "comb" && g.label === "Date of birth (MM/DD/YYYY)",
+    );
+    expect(comb).toMatchObject({ cell_type: "date", date_format: "MMDDYYYY" });
+  });
+
   it("add returns a new id; delete removes fields, members and emptied groups", () => {
     const r = applyOps(canon(), [
       {

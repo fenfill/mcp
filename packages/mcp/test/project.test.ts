@@ -8,7 +8,13 @@ import { applyOps } from "../src/edits.js";
 import { projectAgentSchema } from "../src/project.js";
 import { fixture } from "./helpers.js";
 
-const FIXTURES = ["canonical", "classic_tables", "expandable_tables", "ungrouped_fields"] as const;
+const FIXTURES = [
+  "canonical",
+  "classic_tables",
+  "expandable_tables",
+  "ungrouped_fields",
+  "split_groups",
+] as const;
 
 describe("projectAgentSchema", () => {
   for (const name of FIXTURES) {

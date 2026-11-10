@@ -327,6 +327,40 @@ describe("reanalyze_template", () => {
     expect(ls(join(cacheDir, "pending"))).toEqual([]);
   });
 
+  it("a content-rejected re-run says a retry of the same file won't help", async () => {
+    const mock = new MockApi()
+      .on("GET", new RegExp(`^/v1/templates/${TPL}\\?include=render$`), () =>
+        Response.json({ ...full.agent, template_id: TPL, updated_at: V1, render }),
+      )
+      .on("POST", new RegExp(`^/v1/templates/${TPL}/analyze$`), () =>
+        Response.json(
+          { job_id: RJOB, status: "queued", mode: "ai", pages: [1], cost: 1 },
+          { status: 202 },
+        ),
+      )
+      .on("GET", new RegExp(`^/v1/jobs/${RJOB}\\?include=render$`), () =>
+        Response.json({
+          job_id: RJOB,
+          status: "error",
+          mode: "ai",
+          phase: null,
+          progress: 0,
+          pages: [1],
+          cost: 1,
+          created_at: "x",
+          template_id: null,
+          error: { code: "content_rejected", message: "Refused." },
+          result: null,
+        }),
+      );
+    const c = await server(mock);
+    const r = await c.call("reanalyze_template", { template_id: TPL, pages: "1", kind: "find" });
+    expect(r.data.error).toMatchObject({ code: "content_rejected", job_id: RJOB });
+    const hint = String((r.data.error as { hint: string }).hint);
+    expect(hint).toMatch(/content checks.*unchanged.*refunded/);
+    expect(hint).toMatch(/will not help/);
+  });
+
   it("refreshes the template's cached analyses so analyze_form serves the new page free", async () => {
     // Saved from page 1 only (the 0.1.0 case: page 2 was never analyzed).
     const pdfPath = join(t.dir, "form.pdf");

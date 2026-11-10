@@ -20,12 +20,13 @@ afterEach(async () => {
 });
 
 describe("InMemoryTransport round trip", () => {
-  it("lists exactly the thirteen tools, with annotations and no outputSchema", async () => {
+  it("lists exactly the fourteen tools, with annotations and no outputSchema", async () => {
     c = await connect({ env: env(join(t.dir, "cache")), fetchImpl: new MockApi().fetch });
     const { tools } = await c.client.listTools();
     expect(tools.map((x) => x.name).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(tools).toHaveLength(13);
+    expect(tools).toHaveLength(14);
     expect(tools.map((x) => x.name)).toContain("make_fillable");
+    expect(tools.map((x) => x.name)).toContain("list_sample_forms");
     for (const tool of tools) {
       expect(tool.description, tool.name).toBeTruthy();
       // fill_form / fill_template carry the value-format guide (VALUE_SHAPES).
@@ -52,6 +53,10 @@ describe("InMemoryTransport round trip", () => {
     }
     expect(byName.fill_form.annotations).toMatchObject({ openWorldHint: false });
     expect(byName.get_account.annotations).toMatchObject({ readOnlyHint: true });
+    expect(byName.list_sample_forms.annotations).toMatchObject({ readOnlyHint: true });
+    expect(Object.keys(byName.list_sample_forms.inputSchema.properties ?? {})).toEqual([
+      "download",
+    ]);
     expect(byName.analyze_form.inputSchema.properties).toHaveProperty("save_as_template");
     expect(byName.analyze_form.inputSchema.properties).toHaveProperty("detect_extra_blanks");
     expect(byName.preview_page.description).toMatch(/nothing is written to disk/);
@@ -87,7 +92,7 @@ describe("InMemoryTransport round trip", () => {
       "overwrite",
       "template_id",
     ]);
-    expect(mf.description).toMatch(/Team plan or above/);
+    expect(mf.description).toMatch(/Pro plan or above/);
     expect(mf.description).toMatch(/never sends any/);
     expect(mf.description).not.toMatch(/adobe|acrobat|\bfree\b/i);
     expect(c.client.getServerVersion()?.name).toBe("fenfill");

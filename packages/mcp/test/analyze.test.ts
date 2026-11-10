@@ -302,6 +302,35 @@ describe("analyze_form", () => {
     expect(readdirSync(join(cacheDir, "pending"))).toEqual([]);
   });
 
+  it("a content-rejected job says the scans are refunded and a resubmit won't help", async () => {
+    const mock = new MockApi()
+      .on("POST", /^\/v1\/forms\/analyze$/, () =>
+        json(202, { job_id: JOB, status: "queued", mode: "ai", pages: [1, 2], cost: 2 }),
+      )
+      .on("GET", /^\/v1\/jobs\//, () =>
+        json(200, {
+          job_id: JOB,
+          status: "error",
+          mode: "ai",
+          phase: null,
+          progress: 0,
+          pages: [1, 2],
+          cost: 2,
+          created_at: "x",
+          template_id: null,
+          error: { code: "content_rejected", message: "Refused." },
+          result: null,
+        }),
+      );
+    const r = await (await server(mock)).call("analyze_form", { path: pdfPath });
+    expect(r.data.error).toMatchObject({ code: "content_rejected", job_id: JOB });
+    const hint = String((r.data.error as { hint: string }).hint);
+    expect(hint).toMatch(/content checks/);
+    expect(hint).toMatch(/refunded/);
+    expect(hint).toMatch(/will not help/);
+    expect(readdirSync(join(cacheDir, "pending"))).toEqual([]);
+  });
+
   it("a 410 while polling clears the pending entry", async () => {
     const mock = new MockApi()
       .on("POST", /^\/v1\/forms\/analyze$/, () =>

@@ -23,6 +23,7 @@ import {
   fieldIsAutoFontSize,
   type Group,
   groupFormatOf,
+  type PageInfo,
   signatureScaleOf,
   textFormatOf,
   textMultilineOf,
@@ -41,9 +42,11 @@ import {
   expKey,
   expLayout,
   fieldKey,
+  flowKey,
   resolveMembers,
   splitMulti,
 } from "./fillKeys";
+import { flowLayout, partsLayout, partsMembers } from "./splitFill";
 import type { Mark } from "./stampPdf";
 
 export type { Mark };
@@ -61,6 +64,10 @@ export interface BuildMarksArgs {
   groups: readonly Group[];
   values: Record<string, string>;
   rowCounts: Record<string, number>;
+  // The schema's page sizes (PageInfo: preview raster pixels). A flow split
+  // measures its boxes against these, never against a live PDF page frame, so
+  // every surface breaks a flow value into the same boxes (splitFill.ts).
+  pages: readonly Pick<PageInfo, "page" | "width" | "height">[];
   // When set, only build marks for this page (the per-page overlay path). Omit to
   // build the whole document (the PDF-generation path).
   pageFilter?: number;
@@ -72,6 +79,7 @@ export function buildMarks({
   groups,
   values,
   rowCounts,
+  pages,
   pageFilter,
 }: BuildMarksArgs): Map<number, Mark[]> {
   const fieldById = buildFieldById(fields);
@@ -201,6 +209,69 @@ export function buildMarks({
     }
   };
 
+  // A flow split: its one value (flowKey) distributed over the member boxes by
+  // the stamp's advance table (splitFill.ts distributeFlow), each box an
+  // ordinary single-line mark pinned to the size the flow chose (autoFit off),
+  // so every render path draws the same words at the same size. A clipped box
+  // sits at the minimum size and still overflows: the stamp reports it like an
+  // overlong single-line field (Placement.fits false).
+  const pageById = new Map(pages.map((p) => [p.page, p]));
+  const stampFlow = (g: Group, raw: string | undefined) => {
+    if (typeof raw !== "string" || raw === "") return;
+    // One value, one case: a member asking for capitals capitalizes the flow
+    // before it is measured, so the measured text is the drawn text.
+    const { members, flow } = flowLayout(g, fieldById, pageById, raw, (id) => sharedH.get(id));
+    if (members.length === 0) return;
+    if (!flow) {
+      // No page size yet (a dimension-less ghost page): the whole value in the
+      // first box, fitted like a single-line field.
+      stampValue(members[0], fieldKey(members[0].id), raw);
+      return;
+    }
+    members.forEach((m, i) => {
+      if (flow.parts[i] === "") return;
+      push(m.page, {
+        key: fieldKey(m.id),
+        box: boxPct(m),
+        page: m.page,
+        text: flow.parts[i],
+        center: false,
+        fontSize: flow.sizes[i],
+        anchor: fieldAnchorOf(m),
+        multiline: false,
+        autoFit: false,
+      });
+    });
+  };
+
+  // A parts split (`zł | gr`): both boxes pinned to ONE size (splitFill.ts
+  // partsLayout), each at its own anchor, so `1234` and `56` never print at
+  // different sizes. An empty box stamps nothing, as before. false when the
+  // group is not a well-formed parts split or cannot be measured (no page size
+  // yet): its boxes then stamp like ordinary fields.
+  const stampParts = (g: Group, members: readonly Field[]): boolean => {
+    const pair = partsMembers(g, members);
+    if (!pair) return false;
+    const raw = pair.map((m) => values[fieldKey(m.id)] ?? "") as [string, string];
+    const layout = partsLayout(pair, raw, pageById, (id) => sharedH.get(id));
+    if (!layout) return false;
+    pair.forEach((m, i) => {
+      if (layout.texts[i] === "") return;
+      push(m.page, {
+        key: fieldKey(m.id),
+        box: boxPct(m),
+        page: m.page,
+        text: layout.texts[i],
+        center: false,
+        fontSize: layout.sizePt,
+        anchor: fieldAnchorOf(m),
+        multiline: false,
+        autoFit: false,
+      });
+    });
+    return true;
+  };
+
   // Ungrouped fields.
   for (const f of fields) {
     if (groupedFieldIds.has(f.id)) continue;
@@ -228,6 +299,10 @@ export function buildMarks({
           });
         }
       }
+    } else if (g.kind === "split" && g.rule === "flow" && Object.hasOwn(values, flowKey(g.id))) {
+      stampFlow(g, values[flowKey(g.id)]);
+    } else if (g.kind === "split" && g.rule === "parts" && stampParts(g, members)) {
+      // Stamped by stampParts.
     } else if (g.kind === "table" && groupFormatOf(g) === "expandable") {
       const { pitch, capacity } = expLayout(members);
       const count = visibleRows(g, capacity);
@@ -279,10 +354,11 @@ export function buildMarks({
         }
       }
     } else {
-      // comb + classic / checkbox_matrix table: each member is its own input
-      // (stampValue renders checkbox members with their symbol). Comb cells force
-      // center — the per-character box always centers its glyph; classic-table
-      // cells keep their own anchor.
+      // comb + classic / checkbox_matrix table + split parts: each member is its
+      // own input (stampValue renders checkbox members with their symbol). Comb
+      // cells force center — the per-character box always centers its glyph;
+      // classic-table cells keep their own anchor. A flow split without a flow
+      // value (filled box by box, before its one-input UI) lands here too.
       const combCenter = g.kind === "comb";
       for (const m of members) {
         stampValue(m, fieldKey(m.id), values[fieldKey(m.id)] ?? "", combCenter);

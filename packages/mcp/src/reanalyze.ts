@@ -306,6 +306,9 @@ function jobErrorHint(code: string): string {
   if (code === "no_fields_found") {
     return "fenfill found no fillable fields on those pages. The template is unchanged and any reserved scans are refunded.";
   }
+  if (code === "content_rejected") {
+    return "The file was refused by content checks. The template is unchanged and any reserved scans are refunded. Re-analyzing the same file will not help.";
+  }
   return "The template is unchanged and any reserved scans are refunded automatically. Call reanalyze_template again to retry.";
 }
 

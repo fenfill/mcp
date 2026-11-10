@@ -261,7 +261,7 @@ function cannotStartLine(cp: number): boolean {
 // blocks; the JP face's symbol rows such as ⑪ or ⓐ add no break), unless b
 // may not start a line or a may not end one. A word with no CJK comes back whole,
 // so Latin text wraps exactly as before.
-function cjkPieces(word: string): string[] {
+export function cjkPieces(word: string): string[] {
   const chars = Array.from(word);
   if (chars.length < 2) return [word];
   const pieces: string[] = [];
@@ -286,7 +286,7 @@ function cjkPieces(word: string): string[] {
 }
 
 // Drops the trailing ideographic spaces (U+3000) of a soft-wrapped line.
-const hangIdeoSpaces = (line: string): string => line.replace(/\u3000+$/, "");
+export const hangIdeoSpaces = (line: string): string => line.replace(/\u3000+$/, "");
 
 // Greedy word-wrap `text` to `availWidth` at font `size`. Splits on existing
 // newlines first (preserving blank lines from "\n\n"), then packs words per line,

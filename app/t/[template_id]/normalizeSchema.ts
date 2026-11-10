@@ -141,7 +141,9 @@ function normalizeGroup(g: RawGroup | null): Group | null {
       format: g.format ?? mapped.format,
     } as Group);
   }
-  // Already-v4 kinds (comb/choice/table) pass through with defaults filled in.
+  // Already-v4 kinds (comb/choice/table) pass through with defaults filled in;
+  // split (rule/value_type/frac_digits/pad_frac) passes through untouched —
+  // its absent attributes are read as defaults by the types.ts split helpers.
   if (g.kind === "table")
     return withTableDefaults({ ...g, format: g.format ?? "classic" } as Group);
   if (g.kind === "choice" && !g.format) return { ...g, format: "single" } as Group;

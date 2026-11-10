@@ -32,7 +32,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { AgentSchema, RenderSchema } from "./types.js";
+import type { AgentSchema, JobMode, RenderSchema } from "./types.js";
 
 export const ASSET_TTL_MS = 60 * 60 * 1000;
 export const STALE_LOCK_MS = 10 * 60 * 1000;
@@ -63,6 +63,10 @@ export interface AccountFingerprint {
   workspace_id: string | null;
   /** A truncated sha256 of the key: identifies it, can't be turned back into it. */
   key_sha: string;
+  /** "test" for a test key (ff_test_). Its templates and jobs never mix with
+   *  the live ones of the same workspace. Absent = live (and every entry
+   *  written before test keys existed). */
+  mode?: "test";
 }
 
 /** Which API (FENFILL_API_URL) and account a cache entry belongs to. */
@@ -83,7 +87,7 @@ export interface CachedAnalysis extends IdentityTagged {
   options: AnalyzeOptions;
   job_id: string;
   template_id: string | null;
-  mode: "ai" | "acroform";
+  mode: JobMode;
   cost: number;
   /** The pages this job actually analyzed (the job's `pages`). */
   pages: number[];
@@ -164,7 +168,7 @@ export interface PendingEntry extends IdentityTagged {
   token?: string;
   job_id?: string;
   pages?: number[];
-  mode?: "ai" | "acroform";
+  mode?: JobMode;
   cost?: number;
   /** The 202's free AcroForm hint (only the accept response carries it). */
   extra_blanks_available?: boolean;
@@ -255,6 +259,8 @@ export function keyFingerprint(apiKey: string): string {
 /**
  * Is an entry the same API and account as `who`? The workspace id decides when
  * both sides know it (a rotated key still matches); otherwise the key hash does.
+ * A test key's entries and a live key's never match, even in one workspace:
+ * fenfill keeps test templates and jobs apart from live ones.
  * An entry without these fields (written by an older version) never matches.
  */
 export function sameAccount(
@@ -266,6 +272,7 @@ export function sameAccount(
   }
   const a = e.account;
   if (!a || typeof a !== "object") return false;
+  if ((a.mode === "test") !== (who.account.mode === "test")) return false;
   if (typeof a.workspace_id === "string" && a.workspace_id && who.account.workspace_id) {
     return a.workspace_id === who.account.workspace_id;
   }

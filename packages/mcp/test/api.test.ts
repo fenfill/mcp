@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { errorFromResponse, FenfillApi } from "../src/api.js";
-import { apiConfigFromEnv, apiUrlFromEnv } from "../src/config.js";
+import { contextOf, errorFromResponse, FenfillApi } from "../src/api.js";
+import { apiConfigFromEnv, apiUrlFromEnv, keyMode } from "../src/config.js";
 import { ToolError } from "../src/errors.js";
 import { API_KEY, API_URL, apiError, json, MockApi, virtualClock } from "./helpers.js";
 
@@ -39,6 +39,45 @@ describe("config", () => {
     expect(() => apiConfigFromEnv({})).toThrow(/FENFILL_API_KEY/);
     expect(() => apiConfigFromEnv({ FENFILL_API_KEY: "sk-nope" })).toThrow(/API key/);
     expect(apiConfigFromEnv({ FENFILL_API_KEY: API_KEY }).apiKey).toBe(API_KEY);
+  });
+
+  it("accepts live (ff_live_) and test (ff_test_) keys, and no other prefix", () => {
+    const tail = "a".repeat(43);
+    for (const key of [`ff_live_${tail}`, `ff_test_${tail}`]) {
+      expect(apiConfigFromEnv({ FENFILL_API_KEY: key }).apiKey).toBe(key);
+    }
+    for (const key of [
+      `ff_prod_${tail}`,
+      `ff_tests_${tail}`,
+      `FF_TEST_${tail}`,
+      `ff_test${tail}`,
+    ]) {
+      expect(() => apiConfigFromEnv({ FENFILL_API_KEY: key }), key).toThrow(/API key/);
+    }
+    // The refusal names both prefixes.
+    let hint: string | undefined;
+    try {
+      apiConfigFromEnv({ FENFILL_API_KEY: "sk-nope" });
+    } catch (e) {
+      hint = (e as ToolError).hint;
+    }
+    expect(hint).toMatch(/ff_live_.*ff_test_/);
+  });
+
+  it("the API's invalid_api_key hint names both prefixes", async () => {
+    const e = await errorFromResponse(apiError(401, "invalid_api_key"));
+    expect(e.hint).toMatch(/ff_live_.*ff_test_/);
+  });
+
+  it("keyMode reads only the configured key's prefix", () => {
+    const tail = "a".repeat(43);
+    expect(keyMode({ FENFILL_API_KEY: `ff_test_${tail}` })).toBe("test");
+    expect(keyMode({ FENFILL_API_KEY: ` ff_test_${tail}\n` })).toBe("test");
+    expect(keyMode({ FENFILL_API_KEY: `ff_live_${tail}` })).toBe("live");
+    expect(keyMode({})).toBeNull();
+    expect(keyMode({ FENFILL_API_KEY: "" })).toBeNull();
+    expect(keyMode({ FENFILL_API_KEY: "sk-nope" })).toBeNull();
+    expect(keyMode({ FENFILL_API_KEY: `ff_prod_${tail}` })).toBeNull();
   });
 });
 
@@ -81,15 +120,46 @@ describe("error envelope mapping", () => {
       "not_pdf",
       "pdf_password_required",
       "pdf_fill_forbidden",
+      "export_too_large",
       "rate_limited",
       "too_many_active_jobs",
       "queue_full",
       "internal_error",
       "unavailable",
+      "test_mode_sample_only",
+      "test_mode_no_links",
+      "test_mode_not_available",
     ]) {
       const e = await errorFromResponse(apiError(400, code));
       expect(e.code).toBe(code);
       expect(e.hint, code).toBeTruthy();
+    }
+  });
+
+  it("words the test-key refusals: samples, links, and re-analysis", async () => {
+    const live = /live key \(ff_live_\) on Pro or Business/;
+    const sample = await errorFromResponse(apiError(403, "test_mode_sample_only"));
+    expect(sample.hint).toMatch(/list_sample_forms/);
+    expect(sample.hint).toMatch(/pdf_url/);
+    expect(sample.hint).toMatch(live);
+    const links = await errorFromResponse(
+      apiError(403, "test_mode_no_links"),
+      contextOf("/templates/t1/recipients"),
+    );
+    expect(links.hint).toMatch(/can't create links/);
+    expect(links.hint).toMatch(live);
+    const generic = await errorFromResponse(apiError(403, "test_mode_not_available"));
+    expect(generic.hint).toMatch(/isn't available with a test key/);
+    expect(generic.hint).toMatch(live);
+    const rerun = await errorFromResponse(
+      apiError(403, "test_mode_not_available"),
+      contextOf("/templates/t1/analyze"),
+    );
+    expect(rerun.hint).toMatch(/reanalyze_template isn't available with a test key/);
+    expect(rerun.hint).toMatch(/spends page scans/);
+    expect(rerun.hint).toMatch(live);
+    for (const e of [sample, links, generic, rerun]) {
+      expect(e.hint).not.toMatch(/\bfree\b|\bAI\b/i);
     }
   });
 

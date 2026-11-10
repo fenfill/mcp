@@ -81,7 +81,7 @@ const NOT_SENT_CODES = new Set([
 
 const HINTS: Record<string, string> = {
   invalid_api_key:
-    "Check FENFILL_API_KEY: copy the key again from fenfill (Settings → API keys). It starts with ff_live_.",
+    "Check FENFILL_API_KEY: copy the key again from fenfill (Settings → API keys). It starts with ff_live_ (live) or ff_test_ (test).",
   key_revoked:
     "This API key was revoked. Create a new one in fenfill (Settings → API keys) and update FENFILL_API_KEY.",
   plan_required: "Your fenfill plan doesn't include this. Upgrade in fenfill (Settings → Billing).",
@@ -91,11 +91,15 @@ const HINTS: Record<string, string> = {
   invalid_request: "Check the arguments against the message.",
   template_limit:
     "The workspace is at its plan's template limit: analyze without save_as_template, or delete a template in fenfill.",
+  private_link_limit:
+    "The workspace has created its plan's client links for this month; the count resets on the first of the month (UTC). The message says how to get more.",
   template_not_restricted:
-    "Recipient links need a restricted template: set the template's access to Restricted in fenfill, then retry.",
+    "Recipient links need a template shared with client links (access `restricted`): switch it to Client links in fenfill's share dialog, then retry.",
   result_expired:
     "The analysis result is gone: an unsaved result expires (24 h after the job, 1 h after it is first fetched), and a saved one goes with its template if that template was deleted. Call analyze_form again (it re-uploads and costs scans again); pass save_as_template=true to keep a result.",
   not_pdf: "Pass a PDF file.",
+  export_too_large:
+    "The template has too many fields for one fillable PDF (in all, on one page, or an expandable table with very many rows). Remove some fields with edit_template or in the fenfill web editor, then try again.",
   pdf_password_required:
     "The PDF needs a password to open. Save a copy without the open password, then analyze that.",
   pdf_fill_forbidden: "The PDF's author forbids filling it in, so fenfill can't process it.",
@@ -122,16 +126,24 @@ const HINTS: Record<string, string> = {
     "A job is already running on this template (a re-analysis from this or another session, or the web app). Wait a minute or two, then check get_template (updated_at, pages[].analyzed) before retrying: a finished re-analysis may already show the new fields.",
   kind_required:
     'Some of these pages already have fields, so choose a kind: "find" adds blanks the first pass missed (keeps everything), "relabel" re-derives labels/types/groups keeping the boxes, "label_missing" fills in only missing labels, "scratch" replaces the pages\' fields entirely.',
+  // API test keys (ff_test_).
+  test_mode_sample_only:
+    "This is a test key: analyze_form takes only fenfill's sample forms, byte for byte. Call list_sample_forms with download: a sample's slug (it saves the form on this machine and returns its path), or download one from its pdf_url yourself, and analyze that file unchanged (a copy opened and saved again in another app is a different file). To analyze your own forms, use a live key (ff_live_) on Pro or Business.",
+  test_mode_no_links:
+    "Test keys can't create links (recipient links or a public template). Fill the form on this machine with fill_form or fill_template instead, or use a live key (ff_live_) on Pro or Business.",
+  test_mode_not_available:
+    "This isn't available with a test key. Use a live key (ff_live_) on Pro or Business.",
 };
 
 /** What a request was about, for hints that depend on it (a 404 on a job poll
  *  is not a missing template). */
-export type ErrorContext = "job" | "template" | "reanalyze" | "fillable" | "other";
+export type ErrorContext = "job" | "template" | "reanalyze" | "recipients" | "fillable" | "other";
 
 /** The context of a /v1 path. */
 export function contextOf(path: string): ErrorContext {
   if (path.startsWith("/jobs/")) return "job";
   if (/^\/templates\/[^/?]+\/analyze$/.test(path)) return "reanalyze";
+  if (/^\/templates\/[^/?]+\/recipients(\?|$)/.test(path)) return "recipients";
   if (path.startsWith("/templates")) return "template";
   if (path === "/forms/acroform") return "fillable";
   return "other";
@@ -147,6 +159,9 @@ function hintFor(
   context: ErrorContext,
 ): string | undefined {
   if (context === "reanalyze") {
+    if (code === "test_mode_not_available") {
+      return "reanalyze_template isn't available with a test key: a re-analysis spends page scans. A sample form's template already has fenfill's fields; fix one with edit_template + save_template. To re-analyze your own templates, use a live key (ff_live_) on Pro or Business.";
+    }
     if (code === "template_conflict") {
       return "The template changed in fenfill while this call was starting (current_updated_at). Re-fetch it with get_template, then call reanalyze_template again (it reads the current version itself).";
     }
@@ -159,9 +174,12 @@ function hintFor(
       return `This re-analysis needs ${String(need)} page scans and ${String(have)} are left. Re-analyze fewer pages, or add scans in fenfill (Settings → Billing). estimate: true prices it first.`;
     }
   }
+  if (context === "recipients" && code === "plan_required") {
+    return "Creating and revoking client links through the API needs the Business plan. Reading recipients and status works on any plan with API access, and client links can still be created in the fenfill app on Pro and Business.";
+  }
   if (context === "fillable") {
     if (code === "plan_required") {
-      return "A fillable PDF needs the Team plan or above. Upgrade in fenfill (Settings → Billing); fill_template still fills this template on this machine on any plan.";
+      return "A fillable PDF needs the Pro plan or above. Upgrade in fenfill (Settings → Billing); fill_template still fills this template on this machine on any plan.";
     }
     if (code === "not_found")
       return "Check the id. list_templates shows the workspace's template ids.";

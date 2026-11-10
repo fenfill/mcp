@@ -16,6 +16,8 @@
 // axis holds plain string labels only ("Single-Axis Data Type" rule), so cells
 // never carry conflicting types. checkbox_matrix is exempt (always all-checkbox).
 
+import { dateFormatFromLabel } from "./lib/dateFormatHint";
+
 export const SCHEMA_VERSION = 5;
 
 // Canonical browser-autofill vocabulary (Field.autofill). A curated subset of the
@@ -203,11 +205,26 @@ export interface Field {
 
 // Tier 3 — relational groups (output of the grouping agent). Each kind carries
 // a formatting subtype: comb via cell_type/date_format; choice and table via
-// the `format` discriminator.
-export type GroupKind = "comb" | "choice" | "table";
+// the `format` discriminator; split via `rule` (+ value_type/frac_digits/pad_frac).
+export type GroupKind = "comb" | "choice" | "table" | "split";
 
 export type ChoiceFormat = "single" | "multiple";
 export type TableFormat = "classic" | "expandable" | "checkbox_matrix";
+
+// split: how ONE logical value is distributed over its member text boxes.
+// "parts" = a number cut into [integer, fraction] boxes (zł | gr), exactly two
+// members in that order (the role is order-derived, no per-field attribute);
+// "flow" = one text value wrapped across 2..N boxes in reading order.
+export type SplitRule = "parts" | "flow";
+// split: the logical value's type. parts -> "number", flow -> "text"; absent =>
+// derived from the rule (splitValueTypeOf). "date" is reserved for a future
+// parts-of-a-date split and is NOT accepted yet.
+export type SplitValueType = "number" | "text";
+// split/parts: fraction digits bounds + defaults (see splitFracDigitsOf).
+export const SPLIT_FRAC_DIGITS_MAX = 4;
+export const DEFAULT_SPLIT_FRAC_DIGITS = 2;
+// split/flow: the fewest member boxes (parts is exactly 2).
+export const SPLIT_FLOW_MIN_MEMBERS = 2;
 
 export interface Group {
   id: string; // persistent uuid
@@ -244,6 +261,23 @@ export interface Group {
   description?: string;
   placeholder?: string;
   required?: boolean;
+  // split: the distribution rule (see SplitRule). Required on split, absent on
+  // every other kind. Members are text fields on the group's page; they keep
+  // their own text format (enforceMemberTypes). The group's autofill hint, if
+  // any, lives on members[0].autofill (groups carry no autofill).
+  rule?: SplitRule;
+  // split: the logical value's type (see SplitValueType). Absent => from rule.
+  value_type?: SplitValueType;
+  // split/parts: digits in the fraction box, 0..SPLIT_FRAC_DIGITS_MAX. Absent
+  // => DEFAULT_SPLIT_FRAC_DIGITS (2). Absent on flow.
+  frac_digits?: number;
+  // split/parts: what a WHOLE amount puts in the fraction box: true -> zeros
+  // to frac_digits (1234 -> 1234 | 00), false -> left empty (1234 | ""). A
+  // fraction the value gives is always right-padded to frac_digits regardless
+  // ("12.5" -> 12 | 50; 12 | 5 would read as 5 gr). Absent => true. Absent on
+  // flow.
+  // (splitFill.ts distributeParts.)
+  pad_frac?: boolean;
 }
 
 // ─── Derivations / helpers ───────────────────────────────────────────────────
@@ -412,10 +446,14 @@ export function signatureScaleOf(field: Pick<Field, "type" | "format">): number 
   return Math.min(1, Math.max(SIGNATURE_SCALE_MIN, s));
 }
 
-// A date field's printed format, defaulting to the first DATE_FORMATS option.
-export function dateFormatOf(field: Pick<Field, "format">): string {
-  // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- an empty-string date_format is treated as unset; fall back to the default format
-  return (field.format as DateFormat | undefined)?.date_format || DATE_FORMATS[0];
+// A date field's printed format: its explicit date_format; else the pattern its
+// label asks for ("Date of birth (MM/DD/YYYY)", see lib/dateFormatHint.ts);
+// else the first DATE_FORMATS option. Mirrored by agent_schema.py's _typing.
+export function dateFormatOf(field: Pick<Field, "format" | "label">): string {
+  // An empty-string date_format counts as unset. DATE_FORMATS[0] itself stays
+  // the no-hint default: EU forms rely on day-first.
+  const explicit = (field.format as DateFormat | undefined)?.date_format ?? "";
+  return explicit || (dateFormatFromLabel(field.label) ?? DATE_FORMATS[0]);
 }
 
 // A date field's rendered font size in points. An explicit font_size always
@@ -435,11 +473,10 @@ export function dateAnchorOf(field: Pick<Field, "type" | "format">): TextAnchor 
 // A date field's full format with date_format defaulted and font_size kept as-is
 // (null when unset, so the editor shows "Default"). Like textFormatOf, the editor
 // commits a full format because updateField replaces `format` wholesale.
-export function dateFormatFullOf(field: Pick<Field, "format">): DateFormat {
+export function dateFormatFullOf(field: Pick<Field, "format" | "label">): DateFormat {
   const f = field.format as DateFormat | undefined;
   return {
-    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing -- an empty-string date_format is treated as unset; fall back to the default format
-    date_format: f?.date_format || DATE_FORMATS[0],
+    date_format: dateFormatOf(field),
     font_size: f?.font_size ?? null,
     text_anchor: f?.text_anchor ?? DEFAULT_TEXT_ANCHOR,
   };
@@ -488,26 +525,41 @@ export function labelAxis(group: Pick<Group, "orientation">): Axis {
   return drivingAxis(group) === "col" ? "row" : "col";
 }
 
+// split helpers. Each reads an absent attribute as its documented default; they
+// are meaningless for non-split groups, so guard on kind === "split".
+export function splitValueTypeOf(group: Pick<Group, "rule" | "value_type">): SplitValueType {
+  return group.value_type ?? (group.rule === "parts" ? "number" : "text");
+}
+export function splitFracDigitsOf(group: Pick<Group, "frac_digits">): number {
+  return group.frac_digits ?? DEFAULT_SPLIT_FRAC_DIGITS;
+}
+export function splitPadFracOf(group: Pick<Group, "pad_frac">): boolean {
+  return group.pad_frac ?? true;
+}
+
 // The effective field type a member should render/stamp as, accounting for a
-// group that overwrites its members' type (comb -> text cells; choice and
+// group that overwrites its members' type (comb and split -> text; choice and
 // checkbox_matrix tables -> checkbox). Falls back to the field's own type.
 export function effectiveMemberType(
   group: Pick<Group, "kind" | "format"> | undefined,
   field: Pick<Field, "type">,
 ): FieldType {
   if (!group) return field.type;
-  if (group.kind === "comb") return "text";
+  if (group.kind === "comb" || group.kind === "split") return "text";
   if (group.kind === "choice") return "checkbox";
-  // kind is narrowed to "table" here (comb/choice handled above); groupFormatOf
-  // only yields "checkbox_matrix" for tables, so no explicit kind guard is needed.
+  // kind is narrowed to "table" here (comb/split/choice handled above);
+  // groupFormatOf only yields "checkbox_matrix" for tables, so no explicit kind
+  // guard is needed.
   if (groupFormatOf(group) === "checkbox_matrix") return "checkbox";
   return field.type;
 }
 
 // Rewrite member fields in place to satisfy the group's enforced type. Returns
 // the patched members (new objects) so callers can commit them. Comb leaves the
-// underlying type "text" but defers cell rendering to the group; choice and
-// checkbox_matrix coerce members to checkbox with default formatting.
+// underlying type "text" but defers cell rendering to the group; split members
+// are text and KEEP their own text format (a non-text member is coerced to text
+// with the default format); choice and checkbox_matrix coerce members to
+// checkbox with default formatting.
 export function enforceMemberTypes<T extends Field>(
   group: Pick<Group, "kind" | "format">,
   members: T[],
@@ -518,6 +570,11 @@ export function enforceMemberTypes<T extends Field>(
     return members.map((m) =>
       m.type === "text" && m.format === undefined ? m : { ...m, type: "text", format: undefined },
     );
+  }
+  if (group.kind === "split") {
+    // Split members stay text with their own format (variant/size/anchor/
+    // uppercase); only a non-text member is retyped, with the default format.
+    return members.map((m) => (m.type === "text" ? m : { ...m, type: "text", format: undefined }));
   }
   if (target === "checkbox") {
     return members.map((m) =>
